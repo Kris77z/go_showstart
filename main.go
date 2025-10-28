@@ -10,6 +10,7 @@ import (
 
 	"github.com/staparx/go_showstart/config"
 	"github.com/staparx/go_showstart/log"
+	"github.com/staparx/go_showstart/monitor"
 	"github.com/staparx/go_showstart/vars"
 	"go.uber.org/zap"
 )
@@ -48,6 +49,43 @@ func main() {
 		return
 	}
 	log.Logger.Info("✅ 系统初始化配置完成！")
+
+	if cfg.Monitor != nil && cfg.Monitor.Enable {
+		service, err := monitor.NewService(ctx, cfg)
+		if err != nil {
+			log.Logger.Error("❌ 初始化监控服务失败", zap.Error(err))
+			return
+		}
+
+		log.Logger.Info("👍 开始进入监控模式，按 Ctrl+C 退出")
+		
+		// 创建可取消的上下文
+		monitorCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		// 在 goroutine 中运行监控服务
+		errChan := make(chan error, 1)
+		go func() {
+			errChan <- service.Run(monitorCtx)
+		}()
+
+		// 等待信号或错误
+		stopChan := make(chan os.Signal, 1)
+		signal.Notify(stopChan, syscall.SIGINT, syscall.SIGTERM)
+
+		select {
+		case <-stopChan:
+			log.Logger.Info("⚠️ 接收到关闭信号，正在停止监控...")
+			cancel()
+			<-errChan // 等待服务完全停止
+		case err := <-errChan:
+			if err != nil {
+				log.Logger.Error("监控服务异常结束", zap.Error(err))
+			}
+		}
+
+		return
+	}
 
 	log.Logger.Info("👍开始进入到票务系统抢票流程！！！")
 	validate := NewValidateService(ctx, cfg)

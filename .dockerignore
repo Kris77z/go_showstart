@@ -1,0 +1,10 @@
+# 忽略不需要的文件
+.git
+.gitignore
+README.md
+Dockerfile
+.dockerignore
+monitor_state/
+*.log
+test_webhook.sh
+deploy.sh

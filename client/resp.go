@@ -315,3 +315,22 @@ type GetOrderResultResp struct {
 		OrderID string  `json:"orderId"`
 	} `json:"result"`
 }
+
+type ActivitySearchListResp struct {
+	*ShowStartCommonResp
+	Result struct {
+		ActivityInfo []*ActivityInfo `json:"activityInfo"`
+	} `json:"result"`
+}
+
+type ActivityInfo struct {
+	ActivityID int            `json:"activityId"`
+	Title      string         `json:"title"`
+	ShowTime   string         `json:"showTime"`
+	SiteName   string         `json:"siteName"`
+	OtherLabel []*OtherLabel  `json:"otherLabels"`
+}
+
+type OtherLabel struct {
+	Name string `json:"name"`
+}

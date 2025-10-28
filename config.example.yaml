@@ -30,3 +30,13 @@ smtp_email:
   username: "...@qq.com"
   password: ""
   email_to: "...@qq.com"
+
+monitor:
+  enable: 0
+  keywords:
+    - "汉堡黄"
+    - "艺人B"
+  city_code: "99999"
+  interval_seconds: 180
+  webhook_url: "https://your.webhook.url"
+  state_dir: "monitor_state"

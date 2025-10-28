@@ -16,6 +16,7 @@ type Config struct {
 	Showstart *Showstart  `mapstructure:"showstart"`
 	Ticket    *Ticket     `mapstructure:"ticket"`
 	SmtpEmail *smtp_email `mapstructure:"smtp_email"`
+	Monitor   *Monitor    `mapstructure:"monitor"`
 }
 
 type System struct {
@@ -54,6 +55,15 @@ type smtp_email struct {
 	Password string `mapstructure:"password"`
 	To       string `mapstructure:"email_to"`
 	Enable   bool   `mapstructure:"enable"`
+}
+
+type Monitor struct {
+	Enable         bool     `mapstructure:"enable"`
+	Keywords       []string `mapstructure:"keywords"`
+	CityCode       string   `mapstructure:"city_code"`
+	IntervalSecond int      `mapstructure:"interval_seconds"`
+	WebhookURL     string   `mapstructure:"webhook_url"`
+	StateDir       string   `mapstructure:"state_dir"`
 }
 
 func InitCfg() (*Config, error) {
@@ -150,20 +160,46 @@ func SaveCfg(SessionName string, Price string) error {
 }
 
 func (cfg *Config) Validate() error {
-	if cfg.Ticket == nil {
-		return errors.New("未读取到票务配置信息")
+	monitorEnabled := cfg.Monitor != nil && cfg.Monitor.Enable
+	ticketEnabled := cfg.Ticket != nil && len(cfg.Ticket.List) > 0
+
+	if !monitorEnabled && !ticketEnabled {
+		return errors.New("配置中未开启监控或抢票功能，请至少启用一项")
 	}
 
-	if len(cfg.Ticket.List) == 0 {
-		return errors.New("未读取到要购票的场次以及票价")
-	}
+	if ticketEnabled {
+		if cfg.Ticket == nil {
+			return errors.New("未读取到票务配置信息")
+		}
 
-	if len(cfg.Ticket.People) == 0 {
-		return errors.New("未读取到观演人信息")
+		if len(cfg.Ticket.People) == 0 {
+			return errors.New("未读取到观演人信息")
+		}
 	}
 
 	if cfg.SmtpEmail == nil {
-		return errors.New("未读取到邮件配置信息")
+		if ticketEnabled {
+			return errors.New("未读取到邮件配置信息")
+		}
+	} else {
+		if cfg.SmtpEmail.Enable && (cfg.SmtpEmail.Host == "" || cfg.SmtpEmail.Username == "") {
+			return errors.New("邮件通知已启用，但 host 或 username 为空")
+		}
+	}
+
+	if monitorEnabled {
+		if len(cfg.Monitor.Keywords) == 0 {
+			return errors.New("监控关键词列表为空")
+		}
+		if cfg.Monitor.IntervalSecond <= 0 {
+			cfg.Monitor.IntervalSecond = 180
+		}
+		if cfg.Monitor.CityCode == "" {
+			cfg.Monitor.CityCode = "99999"
+		}
+		if cfg.Monitor.WebhookURL == "" {
+			return errors.New("监控模式需配置 webhook_url")
+		}
 	}
 
 	return nil

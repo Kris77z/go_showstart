@@ -13,6 +13,8 @@ import (
 type ShowStartIface interface {
 	// GetToken 获取token
 	GetToken(ctx context.Context) error
+	// ActivitySearchList 活动搜索
+	ActivitySearchList(ctx context.Context, cityCode, keyword string) (*ActivitySearchListResp, error)
 	// ActivityDetail 活动详情
 	ActivityDetail(ctx context.Context, activityId int) (*ActivityDetailResp, error)
 	// ActivityTicketList 获取票务场次信息
@@ -360,4 +362,33 @@ func (c *ShowStartClient) GetOrderResult(ctx context.Context, orderJobKey string
 	}
 
 	return nil, errors.New(resp.Msg)
+}
+
+func (c *ShowStartClient) ActivitySearchList(ctx context.Context, cityCode, keyword string) (*ActivitySearchListResp, error) {
+	path := "/wap/activity/list"
+	body := fmt.Sprintf(`{"pageNo":1,"cityCode":"%s","keyword":"%s","style":"","activityIds":"","couponCode":"","performerId":"","hosterId":"","siteId":"","tag":"","tourId":"","themeId":"","st_flpv":"%s","sign":"%s","trackPath":""}`,
+		cityCode, keyword, c.StFlpv, c.Sign)
+
+	result, err := c.Post(ctx, path, body)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp ActivitySearchListResp
+	if err := jsoniter.Unmarshal(result, &resp); err != nil {
+		return nil, err
+	}
+
+	if resp.State == "token-expire-at" || resp.Msg == "登录过期了，请重新登录！" {
+		if err := c.GetToken(ctx); err != nil {
+			return nil, err
+		}
+		return c.ActivitySearchList(ctx, cityCode, keyword)
+	}
+
+	if resp.State != "1" {
+		return nil, errors.New(resp.Msg)
+	}
+
+	return &resp, nil
 }
