@@ -13,6 +13,8 @@ RUN go mod download
 # 复制源代码
 COPY . .
 
+RUN cp config.example.yaml config.yaml
+
 # 编译应用
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o showstart_monitor .
 
@@ -20,7 +22,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o showstart_monitor
 FROM alpine:latest
 
 # 安装 ca-certificates（用于 HTTPS 请求）
-RUN apk --no-cache add ca-certificates tzdata
+RUN apk --no-cache add ca-certificates tzdata bash
 
 # 设置时区为上海
 ENV TZ=Asia/Shanghai
@@ -31,7 +33,8 @@ WORKDIR /root/
 COPY --from=builder /app/showstart_monitor .
 
 # 复制配置文件
-COPY --from=builder /app/config.yaml .
+COPY --from=builder /app/config.example.yaml ./config.example.yaml
+COPY --from=builder /app/config.yaml ./config.yaml
 
 # 创建状态文件目录
 RUN mkdir -p monitor_state
@@ -40,4 +43,4 @@ RUN mkdir -p monitor_state
 EXPOSE 8080
 
 # 运行应用
-CMD ["./showstart_monitor"]
+CMD ["/bin/sh", "-c", "if [ -n \"$CONFIG_YAML\" ]; then printf '%s' \"$CONFIG_YAML\" > config.yaml; fi; ./showstart_monitor"]
