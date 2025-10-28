@@ -44,6 +44,7 @@ func (n *Notifier) Send(message string) error {
 	// 发送到所有 webhook
 	var lastErr error
 	for _, webhook := range n.webhooks {
+		// 每次循环都创建新的 Reader
 		resp, err := http.Post(webhook, "application/json", bytes.NewReader(body))
 		if err != nil {
 			lastErr = err
@@ -83,6 +84,7 @@ func (n *Notifier) SendStructured(eventType, artist, title, showTime, siteName, 
 	// 发送到所有 webhook
 	var lastErr error
 	for _, webhook := range n.webhooks {
+		// 每次循环都创建新的 Reader
 		resp, err := http.Post(webhook, "application/json", bytes.NewReader(body))
 		if err != nil {
 			lastErr = err

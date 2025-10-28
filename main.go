@@ -57,6 +57,17 @@ func main() {
 			return
 		}
 
+		// 检查是否为单次运行模式（GitHub Actions）
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			log.Logger.Info("🤖 GitHub Actions 单次监控模式")
+			if err := service.RunOnce(ctx); err != nil {
+				log.Logger.Error("监控执行失败", zap.Error(err))
+				os.Exit(1)
+			}
+			log.Logger.Info("✅ 监控检查完成")
+			return
+		}
+
 		log.Logger.Info("👍 开始进入监控模式，按 Ctrl+C 退出")
 		
 		// 创建可取消的上下文

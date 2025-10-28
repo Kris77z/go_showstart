@@ -72,6 +72,18 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 }
 
+// RunOnce 执行单次监控检查（用于 GitHub Actions）
+func (s *Service) RunOnce(ctx context.Context) error {
+	log.Logger.Info("🎯 执行单次监控检查", zap.Int("keywords", len(s.cfg.Keywords)))
+
+	// 首次尝试刷新 token，失败不致命，后续请求会重试
+	if err := s.client.GetToken(ctx); err != nil {
+		log.Logger.Warn("初始化获取 token 失败，将在后续请求中重试", zap.Error(err))
+	}
+
+	return s.runOnce(ctx)
+}
+
 func (s *Service) runOnce(ctx context.Context) error {
 	for _, keyword := range s.cfg.Keywords {
 		if err := s.monitorKeyword(ctx, keyword); err != nil {

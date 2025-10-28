@@ -22,5 +22,7 @@
 go.work
 go.work.sum
 config.yaml
+monitor_state/
+showstart_monitor
 
 log/log_file/*
