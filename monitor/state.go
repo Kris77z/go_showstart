@@ -6,17 +6,20 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/staparx/go_showstart/log"
 	"go.uber.org/zap"
 )
 
 type StateManager struct {
-	seenPath  string
-	timedPath string
-	mux       sync.RWMutex
-	seen      map[string]struct{}
-	timed     map[string]struct{}
+	seenPath    string
+	timedPath   string
+	initPath    string
+	mux         sync.RWMutex
+	seen        map[string]struct{}
+	timed       map[string]struct{}
+	initialized bool
 }
 
 func NewStateManager(dir string) (*StateManager, error) {
@@ -30,6 +33,7 @@ func NewStateManager(dir string) (*StateManager, error) {
 	mgr := &StateManager{
 		seenPath:  filepath.Join(dir, "seen_events.json"),
 		timedPath: filepath.Join(dir, "timed_purchase.json"),
+		initPath:  filepath.Join(dir, "initialized.flag"),
 		seen:      map[string]struct{}{},
 		timed:     map[string]struct{}{},
 	}
@@ -38,7 +42,30 @@ func NewStateManager(dir string) (*StateManager, error) {
 		return nil, err
 	}
 
+	if _, err := os.Stat(mgr.initPath); err == nil {
+		mgr.initialized = true
+	}
+
 	return mgr, nil
+}
+
+func (s *StateManager) IsInitialized() bool {
+	s.mux.RLock()
+	defer s.mux.RUnlock()
+	return s.initialized
+}
+
+func (s *StateManager) MarkInitialized() {
+	s.mux.Lock()
+	defer s.mux.Unlock()
+	if s.initialized {
+		return
+	}
+	if err := os.WriteFile(s.initPath, []byte(time.Now().Format(time.RFC3339)), 0o644); err != nil {
+		log.Logger.Error("写入初始化标记失败", zap.Error(err))
+		return
+	}
+	s.initialized = true
 }
 
 func (s *StateManager) HasSeen(id string) bool {
@@ -66,6 +93,24 @@ func (s *StateManager) MarkTimed(id string) {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 	s.timed[id] = struct{}{}
+	s.persist()
+}
+
+func (s *StateManager) BatchMark(seenIDs, timedIDs []string) {
+	s.mux.Lock()
+	defer s.mux.Unlock()
+	for _, id := range seenIDs {
+		if id == "" {
+			continue
+		}
+		s.seen[id] = struct{}{}
+	}
+	for _, id := range timedIDs {
+		if id == "" {
+			continue
+		}
+		s.timed[id] = struct{}{}
+	}
 	s.persist()
 }
 
@@ -124,4 +169,3 @@ func (s *StateManager) writeFile(path string, data map[string]struct{}) error {
 
 	return os.WriteFile(path, bytes, 0o644)
 }
-

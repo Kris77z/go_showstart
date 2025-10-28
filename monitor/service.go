@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/staparx/go_showstart/client"
 	"github.com/staparx/go_showstart/config"
 	"github.com/staparx/go_showstart/log"
+	"github.com/staparx/go_showstart/vars"
 	"go.uber.org/zap"
 )
 
@@ -18,6 +20,7 @@ type Service struct {
 	notifier *Notifier
 	cfg      *config.Monitor
 	interval time.Duration
+	location *time.Location
 }
 
 func NewService(ctx context.Context, cfg *config.Config) (*Service, error) {
@@ -39,12 +42,18 @@ func NewService(ctx context.Context, cfg *config.Config) (*Service, error) {
 		interval = 180 * time.Second
 	}
 
+	loc := vars.TimeLocal
+	if loc == nil {
+		loc = time.FixedZone("CST", 8*3600)
+	}
+
 	return &Service{
 		client:   cl,
 		state:    state,
 		notifier: notifier,
 		cfg:      cfg.Monitor,
 		interval: interval,
+		location: loc,
 	}, nil
 }
 
@@ -55,6 +64,8 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.client.GetToken(ctx); err != nil {
 		log.Logger.Warn("初始化获取 token 失败，将在后续请求中重试", zap.Error(err))
 	}
+
+	s.ensureInitialized(ctx)
 
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
@@ -80,6 +91,8 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	if err := s.client.GetToken(ctx); err != nil {
 		log.Logger.Warn("初始化获取 token 失败，将在后续请求中重试", zap.Error(err))
 	}
+
+	s.ensureInitialized(ctx)
 
 	return s.runOnce(ctx)
 }
@@ -109,62 +122,105 @@ func (s *Service) monitorKeyword(ctx context.Context, keyword string) error {
 		return nil
 	}
 
-	kwLower := strings.ToLower(keyword)
+	normalizedKeyword := normalizeKeyword(keyword)
+
 	for _, activity := range resp.Result.ActivityInfo {
 		if activity == nil || activity.ActivityID == 0 || activity.Title == "" {
 			continue
 		}
 
-		if !strings.Contains(strings.ToLower(activity.Title), kwLower) {
+		if !keywordMatches(normalizedKeyword, activity.Title) {
 			continue
 		}
 
-		s.handleNewEvent(activity, keyword)
-		s.handleTimedPurchase(activity, keyword)
+		s.processTimedActivity(activity, keyword)
 	}
 
 	return nil
 }
 
-func (s *Service) handleNewEvent(activity *client.ActivityInfo, keyword string) {
+func (s *Service) processTimedActivity(activity *client.ActivityInfo, keyword string) {
 	activityID := fmt.Sprintf("%d", activity.ActivityID)
-	if s.state.HasSeen(activityID) {
+
+	if !hasTimedLabel(activity.OtherLabel) {
 		return
 	}
 
-	// 构造演出链接
-	activityURL := fmt.Sprintf("https://wap.showstart.com/pages/activity/detail/detail?activityId=%d", activity.ActivityID)
-	
-	// 使用结构化通知（支持 Echobell 模板）
-	if err := s.notifier.SendStructured("new", keyword, activity.Title, activity.ShowTime, activity.SiteName, activityURL); err != nil {
-		log.Logger.Error("Webhook 通知失败", zap.String("type", "new_event"), zap.Error(err))
-		return
-	}
-
-	s.state.MarkSeen(activityID)
-	log.Logger.Info("发现新演出", zap.String("keyword", keyword), zap.String("activityId", activityID), zap.String("title", activity.Title))
-}
-
-func (s *Service) handleTimedPurchase(activity *client.ActivityInfo, keyword string) {
-	activityID := fmt.Sprintf("%d", activity.ActivityID)
 	if s.state.HasTimed(activityID) {
 		return
 	}
 
-	for _, label := range activity.OtherLabel {
-		if label != nil && label.Name == "支持定时购票" {
-			// 构造演出链接
-			activityURL := fmt.Sprintf("https://wap.showstart.com/pages/activity/detail/detail?activityId=%d", activity.ActivityID)
-			
-			// 使用结构化通知（支持 Echobell 模板）
-			if err := s.notifier.SendStructured("timed", keyword, activity.Title, activity.ShowTime, activity.SiteName, activityURL); err != nil {
-				log.Logger.Error("Webhook 通知失败", zap.String("type", "timed_purchase"), zap.Error(err))
-				return
-			}
-			s.state.MarkTimed(activityID)
-			log.Logger.Info("发现定时购", zap.String("keyword", keyword), zap.String("activityId", activityID), zap.String("title", activity.Title))
-			return
-		}
+	activityURL := fmt.Sprintf("https://wap.showstart.com/pages/activity/detail/detail?activityId=%d", activity.ActivityID)
+	if err := s.notifier.SendStructured("timed", keyword, activity.Title, activity.ShowTime, activity.SiteName, activityURL); err != nil {
+		log.Logger.Error("Webhook 通知失败", zap.String("type", "timed_purchase"), zap.Error(err))
+		return
 	}
+
+	s.state.BatchMark([]string{activityID}, []string{activityID})
+	log.Logger.Info("发现定时购", zap.String("keyword", keyword), zap.String("activityId", activityID), zap.String("title", activity.Title))
 }
 
+func (s *Service) ensureInitialized(ctx context.Context) {
+	if s.state.IsInitialized() {
+		return
+	}
+
+	var (
+		seenIDs  []string
+		timedIDs []string
+	)
+
+	for _, keyword := range s.cfg.Keywords {
+		resp, err := s.client.ActivitySearchList(ctx, s.cfg.CityCode, keyword)
+		if err != nil {
+			log.Logger.Warn("初始化拉取演出失败", zap.String("keyword", keyword), zap.Error(err))
+			continue
+		}
+
+		normalizedKeyword := normalizeKeyword(keyword)
+		for _, activity := range resp.Result.ActivityInfo {
+			if activity == nil || activity.ActivityID == 0 || activity.Title == "" {
+				continue
+			}
+			if !keywordMatches(normalizedKeyword, activity.Title) {
+				continue
+			}
+			id := fmt.Sprintf("%d", activity.ActivityID)
+			seenIDs = append(seenIDs, id)
+			if hasTimedLabel(activity.OtherLabel) {
+				timedIDs = append(timedIDs, id)
+			}
+		}
+	}
+
+	s.state.BatchMark(seenIDs, timedIDs)
+	s.state.MarkInitialized()
+	log.Logger.Info("监控状态初始化完成", zap.Int("seen", len(seenIDs)), zap.Int("timed", len(timedIDs)))
+}
+
+func normalizeKeyword(input string) string {
+	return strings.TrimSpace(strings.ToLower(removeSpecialChars(input)))
+}
+
+func keywordMatches(normalizedKeyword string, title string) bool {
+	titleNormalized := strings.ToLower(removeSpecialChars(title))
+	return strings.Contains(titleNormalized, normalizedKeyword)
+}
+
+func removeSpecialChars(input string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.Is(unicode.Han, r) {
+			return unicode.ToLower(r)
+		}
+		return -1
+	}, input)
+}
+
+func hasTimedLabel(labels []*client.OtherLabel) bool {
+	for _, label := range labels {
+		if label != nil && label.Name == "支持定时购票" {
+			return true
+		}
+	}
+	return false
+}
