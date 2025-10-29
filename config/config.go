@@ -58,12 +58,13 @@ type smtp_email struct {
 }
 
 type Monitor struct {
-	Enable         bool     `mapstructure:"enable"`
-	Keywords       []string `mapstructure:"keywords"`
-	CityCode       string   `mapstructure:"city_code"`
-	IntervalSecond int      `mapstructure:"interval_seconds"`
-	WebhookURL     string   `mapstructure:"webhook_url"`
-	StateDir       string   `mapstructure:"state_dir"`
+	Enable          bool     `mapstructure:"enable"`
+	Keywords        []string `mapstructure:"keywords"`
+	CityCode        string   `mapstructure:"city_code"`
+	IntervalSecond  int      `mapstructure:"interval_seconds"`
+	WebhookURL      string   `mapstructure:"webhook_url"`
+	StateDir        string   `mapstructure:"state_dir"`
+	AlertWebhookURL string   `mapstructure:"alert_webhook_url"`
 }
 
 func InitCfg() (*Config, error) {

@@ -36,7 +36,6 @@ func NewService(ctx context.Context, cfg *config.Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	notifier := NewNotifier(cfg.Monitor.WebhookURL)
 	interval := time.Duration(cfg.Monitor.IntervalSecond) * time.Second
 	if interval <= 0 {
 		interval = 180 * time.Second
@@ -50,7 +49,7 @@ func NewService(ctx context.Context, cfg *config.Config) (*Service, error) {
 	return &Service{
 		client:   cl,
 		state:    state,
-		notifier: notifier,
+		notifier: NewNotifier(cfg.Monitor.WebhookURL, cfg.Monitor.AlertWebhookURL),
 		cfg:      cfg.Monitor,
 		interval: interval,
 		location: loc,
@@ -114,6 +113,8 @@ func (s *Service) runOnce(ctx context.Context) error {
 func (s *Service) monitorKeyword(ctx context.Context, keyword string) error {
 	resp, err := s.client.ActivitySearchList(ctx, s.cfg.CityCode, keyword)
 	if err != nil {
+		log.Logger.Error("请求演出列表失败", zap.String("keyword", keyword), zap.Error(err))
+		s.alert(fmt.Sprintf("关键词 %s 演出列表请求失败：%v", keyword, err))
 		return err
 	}
 
@@ -153,6 +154,7 @@ func (s *Service) processTimedActivity(activity *client.ActivityInfo, keyword st
 	activityURL := fmt.Sprintf("https://wap.showstart.com/pages/activity/detail/detail?activityId=%d", activity.ActivityID)
 	if err := s.notifier.SendStructured("timed", keyword, activity.Title, activity.ShowTime, activity.SiteName, activityURL); err != nil {
 		log.Logger.Error("Webhook 通知失败", zap.String("type", "timed_purchase"), zap.Error(err))
+		s.alert(fmt.Sprintf("告警：通知发送失败，关键词=%s，演出=%s，错误=%v", keyword, activity.Title, err))
 		return
 	}
 
@@ -174,6 +176,7 @@ func (s *Service) ensureInitialized(ctx context.Context) {
 		resp, err := s.client.ActivitySearchList(ctx, s.cfg.CityCode, keyword)
 		if err != nil {
 			log.Logger.Warn("初始化拉取演出失败", zap.String("keyword", keyword), zap.Error(err))
+			s.alert(fmt.Sprintf("初始化失败：关键词 %s 拉取异常：%v", keyword, err))
 			continue
 		}
 
@@ -196,6 +199,12 @@ func (s *Service) ensureInitialized(ctx context.Context) {
 	s.state.BatchMark(seenIDs, timedIDs)
 	s.state.MarkInitialized()
 	log.Logger.Info("监控状态初始化完成", zap.Int("seen", len(seenIDs)), zap.Int("timed", len(timedIDs)))
+}
+
+func (s *Service) alert(message string) {
+	if err := s.notifier.SendAlert(message); err != nil {
+		log.Logger.Warn("告警发送失败", zap.Error(err))
+	}
 }
 
 func normalizeKeyword(input string) string {

@@ -10,30 +10,39 @@ import (
 
 type Notifier struct {
 	webhooks []string
+	alerts   []string
 }
 
-func NewNotifier(webhookURL string) *Notifier {
-	// 支持多个 webhook，用逗号分隔
-	var webhooks []string
-	if webhookURL != "" {
-		for _, url := range strings.Split(webhookURL, ",") {
-			url = strings.TrimSpace(url)
-			if url != "" {
-				webhooks = append(webhooks, url)
-			}
+func NewNotifier(webhookURL, alertURL string) *Notifier {
+	return &Notifier{
+		webhooks: splitWebhooks(webhookURL),
+		alerts:   splitWebhooks(alertURL),
+	}
+}
+
+func splitWebhooks(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	res := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			res = append(res, part)
 		}
 	}
-	return &Notifier{webhooks: webhooks}
+	return res
 }
 
 func (n *Notifier) Send(message string) error {
 	if len(n.webhooks) == 0 {
 		return fmt.Errorf("未配置 webhook_url")
 	}
-	
+
 	payload := map[string]interface{}{
 		"msg_type": "text",
-		"content": map[string]string{"text": message},
+		"content":  map[string]string{"text": message},
 	}
 
 	body, err := json.Marshal(payload)
@@ -51,7 +60,7 @@ func (n *Notifier) Send(message string) error {
 			continue
 		}
 		resp.Body.Close()
-		
+
 		if resp.StatusCode >= 300 {
 			lastErr = fmt.Errorf("webhook 返回异常状态: %d", resp.StatusCode)
 		}
@@ -68,12 +77,12 @@ func (n *Notifier) SendStructured(eventType, artist, title, showTime, siteName, 
 
 	// 使用 Echobell 模板变量
 	payload := map[string]interface{}{
-		"type":     eventType,    // "new" 或 "timed"
-		"artist":   artist,       // 艺人名称
-		"title":    title,        // 演出标题
-		"showTime": showTime,     // 演出时间
-		"siteName": siteName,     // 场馆名称
-		"url":      activityURL,  // 演出链接（可选）
+		"type":     eventType,   // "new" 或 "timed"
+		"artist":   artist,      // 艺人名称
+		"title":    title,       // 演出标题
+		"showTime": showTime,    // 演出时间
+		"siteName": siteName,    // 场馆名称
+		"url":      activityURL, // 演出链接（可选）
 	}
 
 	body, err := json.Marshal(payload)
@@ -91,7 +100,7 @@ func (n *Notifier) SendStructured(eventType, artist, title, showTime, siteName, 
 			continue
 		}
 		resp.Body.Close()
-		
+
 		if resp.StatusCode >= 300 {
 			lastErr = fmt.Errorf("webhook 返回异常状态: %d", resp.StatusCode)
 		}
@@ -100,5 +109,35 @@ func (n *Notifier) SendStructured(eventType, artist, title, showTime, siteName, 
 	return lastErr
 }
 
+func (n *Notifier) SendAlert(message string) error {
+	if len(n.alerts) == 0 {
+		return nil
+	}
 
+	payload := map[string]interface{}{
+		"msg_type": "text",
+		"content": map[string]string{
+			"text": message,
+		},
+	}
 
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	var lastErr error
+	for _, webhook := range n.alerts {
+		resp, err := http.Post(webhook, "application/json", bytes.NewReader(body))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			lastErr = fmt.Errorf("alert webhook 返回异常状态: %d", resp.StatusCode)
+		}
+	}
+
+	return lastErr
+}
