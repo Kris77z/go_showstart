@@ -2,12 +2,18 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"time"
+
 	"github.com/staparx/go_showstart/config"
+	"github.com/staparx/go_showstart/log"
 	"github.com/staparx/go_showstart/util"
 	"github.com/staparx/go_showstart/vars"
-	"io"
-	"net/http"
+	"go.uber.org/zap"
 	"strings"
 )
 
@@ -41,7 +47,16 @@ func NewShowStartClient(ctx context.Context, cfg *config.Showstart) ShowStartIfa
 
 	c := &ShowStartClient{
 		BashUrl: "https://wap.showstart.com/v3",
-		client:  &http.Client{},
+		client: &http.Client{
+			Timeout: 20 * time.Second,
+			Transport: &http.Transport{
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 15 * time.Second,
+				IdleConnTimeout:       30 * time.Second,
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   10,
+			},
+		},
 		ClientHeaderConfig: &ClientHeaderConfig{
 			Sign:        cfg.Sign,
 			Token:       cfg.Token,
@@ -63,22 +78,72 @@ func NewShowStartClient(ctx context.Context, cfg *config.Showstart) ShowStartIfa
 }
 
 func (c *ShowStartClient) Post(ctx context.Context, path string, body string) ([]byte, error) {
-	req, err := c.NewRequest(ctx, "POST", path, body)
-	if err != nil {
-		return nil, err
+	var lastErr error
+	backoff := 500 * time.Millisecond
+
+	for attempt := 0; attempt < 3; attempt++ {
+		req, err := c.NewRequest(ctx, "POST", path, body)
+		if err != nil {
+			return nil, err
+		}
+
+		res, err := c.client.Do(req)
+		if err != nil {
+			lastErr = err
+			if attempt < 2 && shouldRetry(err) {
+				log.Logger.Warn("请求失败，将重试", zap.String("path", path), zap.Int("attempt", attempt+1), zap.Error(err))
+				time.Sleep(backoff)
+				backoff *= 2
+				continue
+			}
+			return nil, err
+		}
+
+		data, readErr := io.ReadAll(res.Body)
+		res.Body.Close()
+		if readErr != nil {
+			lastErr = readErr
+			if attempt < 2 {
+				log.Logger.Warn("读取响应失败，将重试", zap.String("path", path), zap.Int("attempt", attempt+1), zap.Error(readErr))
+				time.Sleep(backoff)
+				backoff *= 2
+				continue
+			}
+			return nil, readErr
+		}
+
+		if res.StatusCode >= 500 {
+			lastErr = fmt.Errorf("http %d", res.StatusCode)
+			if attempt < 2 {
+				log.Logger.Warn("服务器返回 5xx，即将重试", zap.String("path", path), zap.Int("status", res.StatusCode))
+				time.Sleep(backoff)
+				backoff *= 2
+				continue
+			}
+			return nil, fmt.Errorf("http %d: %s", res.StatusCode, string(data))
+		}
+
+		if res.StatusCode >= 400 {
+			return nil, fmt.Errorf("http %d: %s", res.StatusCode, string(data))
+		}
+
+		return data, nil
 	}
 
-	res, err := c.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	result, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, err
-	}
+	return nil, lastErr
+}
 
-	return result, nil
+func shouldRetry(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() || netErr.Temporary() {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *ShowStartClient) NewRequest(ctx context.Context, method, path string, body string) (*http.Request, error) {
@@ -106,7 +171,7 @@ func (c *ShowStartClient) NewRequest(ctx context.Context, method, path string, b
 		Cterminal: c.Cterminal,
 	})
 
-	req, err := http.NewRequest(method, c.BashUrl+path, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, method, c.BashUrl+path, strings.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
