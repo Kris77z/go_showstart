@@ -48,6 +48,7 @@ type ShowStartClient struct {
 	authAccountAlias string
 	authStateModTime time.Time
 	authStateMu      sync.Mutex
+	tokenRefreshMu   sync.Mutex
 	*ClientHeaderConfig
 }
 
@@ -222,11 +223,27 @@ func (c *ShowStartClient) applyCapturedAccount(account capturedAccount) {
 }
 
 func (c *ShowStartClient) Post(ctx context.Context, path string, body string) ([]byte, error) {
+	return c.postWithAuth(ctx, path, body, nil)
+}
+
+func (c *ShowStartClient) postWithAuth(ctx context.Context, path, body string, auth *ClientHeaderConfig) ([]byte, error) {
+	if path == "/nj/order/order" || path == "/nj/order/coreOrder" {
+		return nil, ErrUnsafeLegacySubmit
+	}
+	if !legacyReadPath(path) {
+		return nil, errors.New("unsupported: legacy request path")
+	}
 	var lastErr error
 	backoff := 500 * time.Millisecond
 
 	for attempt := 0; attempt < 3; attempt++ {
-		req, err := c.NewRequest(ctx, "POST", path, body)
+		var req *http.Request
+		var err error
+		if auth == nil {
+			req, err = c.NewRequest(ctx, "POST", path, body)
+		} else {
+			req, err = c.newRequestWithAuth(ctx, "POST", path, body, *auth)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -236,7 +253,9 @@ func (c *ShowStartClient) Post(ctx context.Context, path string, body string) ([
 			lastErr = err
 			if attempt < 2 && shouldRetry(err) {
 				log.Logger.Warn("请求失败，将重试", zap.String("path", path), zap.Int("attempt", attempt+1), zap.Error(err))
-				time.Sleep(backoff)
+				if err := waitContext(ctx, backoff); err != nil {
+					return nil, err
+				}
 				backoff *= 2
 				continue
 			}
@@ -249,7 +268,9 @@ func (c *ShowStartClient) Post(ctx context.Context, path string, body string) ([
 			lastErr = readErr
 			if attempt < 2 {
 				log.Logger.Warn("读取响应失败，将重试", zap.String("path", path), zap.Int("attempt", attempt+1), zap.Error(readErr))
-				time.Sleep(backoff)
+				if err := waitContext(ctx, backoff); err != nil {
+					return nil, err
+				}
 				backoff *= 2
 				continue
 			}
@@ -260,15 +281,17 @@ func (c *ShowStartClient) Post(ctx context.Context, path string, body string) ([
 			lastErr = fmt.Errorf("http %d", res.StatusCode)
 			if attempt < 2 {
 				log.Logger.Warn("服务器返回 5xx，即将重试", zap.String("path", path), zap.Int("status", res.StatusCode))
-				time.Sleep(backoff)
+				if err := waitContext(ctx, backoff); err != nil {
+					return nil, err
+				}
 				backoff *= 2
 				continue
 			}
-			return nil, fmt.Errorf("http %d: %s", res.StatusCode, string(data))
+			return nil, fmt.Errorf("http %d", res.StatusCode)
 		}
 
 		if res.StatusCode >= 400 {
-			return nil, fmt.Errorf("http %d: %s", res.StatusCode, string(data))
+			return nil, fmt.Errorf("http %d", res.StatusCode)
 		}
 
 		return data, nil
@@ -292,12 +315,34 @@ func shouldRetry(err error) bool {
 
 func (c *ShowStartClient) NewRequest(ctx context.Context, method, path string, body string) (*http.Request, error) {
 	c.refreshAuthFromStateFileIfNeeded()
+	c.authStateMu.Lock()
+	auth := *c.ClientHeaderConfig
+	c.authStateMu.Unlock()
+	return c.newRequestWithAuth(ctx, method, path, body, auth)
+}
+
+func (c *ShowStartClient) newRequestWithAuth(ctx context.Context, method, path, body string, auth ClientHeaderConfig) (*http.Request, error) {
+	if path == "/nj/order/order" || path == "/nj/order/coreOrder" {
+		return nil, ErrUnsafeLegacySubmit
+	}
+	// The body, encryption key, signature and headers all use one snapshot.
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(body), &payload); err != nil || payload == nil {
+		return nil, errors.New("request body must be a JSON object")
+	}
+	payload["st_flpv"], _ = json.Marshal(auth.StFlpv)
+	payload["sign"], _ = json.Marshal(auth.Sign)
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	body = string(raw)
 
 	traceId := util.GenerateTraceId(32)
 	if need, ok := vars.EncryptPathMap[path]; ok && need {
 
 		// 加密
-		encrypt, err := util.AESEncrypt(body, util.GenerateKey(traceId, c.Token))
+		encrypt, err := util.AESEncrypt(body, util.GenerateKey(traceId, auth.Token))
 		if err != nil {
 			return nil, err
 		}
@@ -308,13 +353,13 @@ func (c *ShowStartClient) NewRequest(ctx context.Context, method, path string, b
 	crpsign := util.GenerateSign(&util.GenerateSignReq{
 		Path:      path,
 		Data:      body,
-		Cusat:     c.Cusat,
-		Sign:      c.Sign,
-		Cusit:     c.Cusit,
-		Cusid:     c.Cusid,
+		Cusat:     auth.Cusat,
+		Sign:      auth.Sign,
+		Cusit:     auth.Cusit,
+		Cusid:     auth.Cusid,
 		TraceId:   traceId,
-		Token:     c.Token,
-		Cterminal: c.Cterminal,
+		Token:     auth.Token,
+		Cterminal: auth.Cterminal,
 	})
 
 	req, err := http.NewRequestWithContext(ctx, method, c.BashUrl+path, strings.NewReader(body))
@@ -322,31 +367,50 @@ func (c *ShowStartClient) NewRequest(ctx context.Context, method, path string, b
 		return nil, err
 	}
 
-	req.Header.Add("cookie", c.Cookie)
-	req.Header.Add("cdeviceinfo", c.Cdeviceinfo)
-	req.Header.Add("cdeviceno", c.Cdeviceno)
-	req.Header.Add("cusut", c.Cusut)
-	req.Header.Add("csappid", c.Csappid)
-	req.Header.Add("cterminal", c.Cterminal)
-	req.Header.Add("cusid", c.Cusid)
-	req.Header.Add("cusname", c.Cusname)
-	req.Header.Add("cuuserref", c.Cuuserref)
-	req.Header.Add("cversion", c.Cversion)
-	req.Header.Add("st_flpv", c.StFlpv)
+	req.Header.Add("cookie", auth.Cookie)
+	req.Header.Add("cdeviceinfo", auth.Cdeviceinfo)
+	req.Header.Add("cdeviceno", auth.Cdeviceno)
+	req.Header.Add("cusut", auth.Cusut)
+	req.Header.Add("csappid", auth.Csappid)
+	req.Header.Add("cterminal", auth.Cterminal)
+	req.Header.Add("cusid", auth.Cusid)
+	req.Header.Add("cusname", auth.Cusname)
+	req.Header.Add("cuuserref", auth.Cuuserref)
+	req.Header.Add("cversion", auth.Cversion)
+	req.Header.Add("st_flpv", auth.StFlpv)
 	req.Header.Add("crtraceid", traceId)
 	req.Header.Add("crpsign", crpsign)
 
-	if c.Cusat == "" {
+	if auth.Cusat == "" {
 		req.Header.Add("cusat", "nil")
 	} else {
-		req.Header.Add("cusat", c.Cusat)
+		req.Header.Add("cusat", auth.Cusat)
 	}
 
-	if c.Cusit == "" {
+	if auth.Cusit == "" {
 		req.Header.Add("cusit", "nil")
 	} else {
-		req.Header.Add("cusit", c.Cusit)
+		req.Header.Add("cusit", auth.Cusit)
 	}
 
 	return req, nil
+}
+
+func legacyReadPath(path string) bool {
+	switch path {
+	case "/waf/gettoken", "/wap/activity/list", "/wap/activity/details", "/wap/activity/V2/ticket/list", "/order/wap/order/confirm", "/wap/address/list", "/wap/cp/list", "/nj/coupon/order_list", "/nj/order/getOrderResult":
+		return true
+	}
+	return false
+}
+
+func waitContext(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }

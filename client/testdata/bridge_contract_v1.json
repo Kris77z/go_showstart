@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "request_keys": [
+    {"value": "request-0001", "valid": true},
+    {"value": "abc_DEF-123", "valid": true},
+    {"value": "short", "valid": false},
+    {"value": "request.key1", "valid": false},
+    {"value": "request:key1", "valid": false},
+    {"value": "request key1", "valid": false}
+  ],
+  "selection_base": {
+    "activity_id": 1, "ticket_id": "t1", "quantity": 2,
+    "unit_price": "19.90", "total_amount": "39.80", "performer_ids": ["11", "12"],
+    "order_type": 1, "delivery": "electronic", "coupon_id": "", "address_id": ""
+  },
+  "selections": [
+    {"name": "explicit_two_tickets", "patch": {}, "valid": true},
+    {"name": "no_real_name_ids_explicit", "patch": {"performer_ids": []}, "valid": true},
+    {"name": "quantity_hundred", "patch": {"quantity": 100, "unit_price": "1", "total_amount": "100", "performer_ids": []}, "valid": true},
+    {"name": "quantity_zero", "patch": {"quantity": 0}, "valid": false},
+    {"name": "quantity_over_hundred", "patch": {"quantity": 101}, "valid": false},
+    {"name": "decimal_not_float", "patch": {"quantity": 3, "unit_price": "0.10", "total_amount": "0.30", "performer_ids": []}, "valid": true},
+    {"name": "amount_mismatch", "patch": {"total_amount": "39.79"}, "valid": false},
+    {"name": "three_decimal_places", "patch": {"unit_price": "19.900"}, "valid": false},
+    {"name": "leading_zero", "patch": {"unit_price": "019.90"}, "valid": false},
+    {"name": "scientific_notation", "patch": {"unit_price": "1.99e1"}, "valid": false},
+    {"name": "non_finite", "patch": {"unit_price": "NaN"}, "valid": false},
+    {"name": "money_too_large", "patch": {"unit_price": "1000000000.00"}, "valid": false},
+    {"name": "performer_count", "patch": {"performer_ids": ["11"]}, "valid": false},
+    {"name": "performer_duplicate", "patch": {"performer_ids": ["11", "11"]}, "valid": false},
+    {"name": "performer_null", "patch": {"performer_ids": null}, "valid": false},
+    {"name": "unsupported_order_type", "patch": {"order_type": 2}, "valid": false},
+    {"name": "unsupported_address", "patch": {"address_id": "addr"}, "valid": false},
+    {"name": "unsupported_coupon", "patch": {"coupon_id": "coupon"}, "valid": false},
+    {"name": "unsupported_delivery", "patch": {"delivery": "mail"}, "valid": false}
+  ]
+}

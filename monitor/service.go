@@ -33,6 +33,9 @@ func NewService(ctx context.Context, cfg *config.Config) (*Service, error) {
 	if cfg.Showstart == nil {
 		return nil, fmt.Errorf("缺少 showstart 配置")
 	}
+	if cfg.Monitor.AutoPurchaseEnable {
+		return nil, client.ErrUnsafeLegacySubmit
+	}
 
 	log.Logger.Info("初始化监控客户端")
 	cl := client.NewShowStartClient(ctx, cfg.Showstart)
@@ -260,7 +263,7 @@ func (s *Service) processTimedActivity(ctx context.Context, activity *client.Act
 	// 注意：AutoPurchaseEnable 默认为 false，旧配置文件不包含此字段时不会触发
 	if s.cfg != nil && s.cfg.AutoPurchaseEnable && s.purchaseService != nil {
 		// 使用独立的 context，避免抢票的取消影响监控
-		purchaseCtx := context.Background()
+		purchaseCtx := ctx
 		activityIDInt, err := strconv.Atoi(activityID)
 		if err == nil {
 			// 使用 defer recover 确保抢票启动失败不会影响监控

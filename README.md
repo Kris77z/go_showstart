@@ -1,8 +1,10 @@
 # go_showstart
 ## 项目介绍
-go_showstart是一个基于golang的秀动自动化工具，当前支持两种模式：
+go_showstart 是一个基于 Go 的秀动自动化工具。本候选版本提供稳定监控兼容入口，以及独立显式的 App bridge 订单 CLI。
 
-- **抢票模式**：按照既定时间并发请求，尝试下单购票；
+原 `ticket`、自动购买和旧 worker 写入口已禁用。新下单使用 `cmd/bridge-order`，原 binary 回退使用 `cmd/legacy-order-guard`；完整能力表、请求参数和未知订单规则见 [bridge-orders.md](docs/bridge-orders.md)。以下旧抢票配置说明保留作历史参考，不能直接恢复候选版本的写入。
+
+- **显式订单 CLI**：明确票档、数量、实名人、金额和类型，通过本机 bridge 准备、提交及恢复订单；
 - **监控模式（新增）**：定时调用秀动演出列表接口，监控艺人新演出与“支持定时购票”标签，并通过 Webhook 发送提醒。
 
 ## 注意事项：
@@ -13,9 +15,9 @@ go_showstart是一个基于golang的秀动自动化工具，当前支持两种�
 ## 使用说明
 1. 在 [Releases](https://github.com/staparx/go_showstart/releases)中，下载对应系统的可执行文件。
 2. 参考`config.example.yaml`文件，在可执行文件同目录创建 `config.yaml`。
-3. 根据需求选择开启 **ticket**（抢票）或 **monitor**（监控）配置；两者可独立启用。
+3. 此主程序使用 **monitor** 配置。显式下单另按 [bridge-orders.md](docs/bridge-orders.md) 构建并调用 CLI。
 4. 运行可执行文件：
-   - 若开启抢票模式，程序会在达到开始时间后自动尝试下单；
+   - 若开启旧抢票或自动购买配置，候选版本会明确拒绝；
    - 若开启监控模式，程序会常驻轮询，日志中可看到每次检测结果。
 5. 抢票模式使用前，请登陆 App 提前填写观演人信息；若需邮寄，请设置默认地址。
 

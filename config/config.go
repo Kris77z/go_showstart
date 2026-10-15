@@ -176,6 +176,9 @@ func SaveCfg(SessionName string, Price string) error {
 func (cfg *Config) Validate() error {
 	monitorEnabled := cfg.Monitor != nil && cfg.Monitor.Enable
 	ticketEnabled := cfg.Ticket != nil && len(cfg.Ticket.List) > 0
+	if (!monitorEnabled && ticketEnabled) || (monitorEnabled && cfg.Monitor.AutoPurchaseEnable) {
+		return errors.New("旧 Go 写入口已禁用；显式下单请使用 bridge-order，回退旧 binary 必须使用 legacy-order-guard")
+	}
 
 	if !monitorEnabled && !ticketEnabled {
 		return errors.New("配置中未开启监控或抢票功能，请至少启用一项")

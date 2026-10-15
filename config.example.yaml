@@ -15,6 +15,7 @@ showstart:
   cdeviceinfo: ""
 
 ticket:
+  # 历史旧写配置；候选Go版本拒绝此写入口。显式订单见docs/bridge-orders.md。
   activity_id: 123456
   start_time: "2024-07-25 12:00:00.000"
   list:

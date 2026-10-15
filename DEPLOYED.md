@@ -1,5 +1,7 @@
 # 当前部署版本归档
 
+本文件下文描述原始归档基线 `f5db1d579cf769bca309af3430e18ffc616e7e94`，不是本候选源码已部署的证明。候选版本保留监控路径，禁用原 Go 写入口；显式 App 订单 CLI、能力边界和原 binary 回退 wrapper 见 [bridge-orders.md](docs/bridge-orders.md)。本轮没有重启或变更稳定服务。
+
 2026-10-15 从运行中服务的 `/opt/showstart/go-monitor` 提取源码。
 除删除一个历史注释中的账号请求示例和格式化两个 Go 文件外，运行源码保持服务器版本；没有重启或重新部署。
 
