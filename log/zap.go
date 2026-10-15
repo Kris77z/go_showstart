@@ -22,6 +22,20 @@ func InitLogger() {
 var director = "log/log_file"
 
 func initZap() (logger *zap.Logger) {
+	if os.Getenv("SHOWSTART_LOG_STDOUT_ONLY") == "1" {
+		level = zap.InfoLevel
+		infoLevel := zap.LevelEnablerFunc(func(lvl zapcore.Level) bool {
+			return lvl < zapcore.ErrorLevel && lvl >= level
+		})
+		errLevel := zap.LevelEnablerFunc(func(lvl zapcore.Level) bool {
+			return lvl >= zapcore.ErrorLevel
+		})
+
+		return zap.New(zapcore.NewTee(
+			zapcore.NewCore(getEncoder(), zapcore.AddSync(os.Stdout), infoLevel),
+			zapcore.NewCore(getEncoder(), zapcore.AddSync(os.Stderr), errLevel),
+		))
+	}
 
 	if ok, _ := PathExists("log/log_file"); !ok { // 判断是否有Director文件夹
 		fmt.Printf("创建日志文件 %v \n", director)

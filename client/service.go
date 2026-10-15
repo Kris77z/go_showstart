@@ -2,393 +2,167 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
-
-	jsoniter "github.com/json-iterator/go"
-	"github.com/staparx/go_showstart/log"
 )
 
+var ErrUnsafeLegacySubmit = errors.New("旧 Go 写入口已禁用；请用显式 bridge-order CLI 和持久化订单记录提交")
+var ErrOrderPending = errors.New("订单 pending；结果未决，不能重新创建")
+
 type ShowStartIface interface {
-	// GetToken 获取token
-	GetToken(ctx context.Context) error
-	// ActivitySearchList 活动搜索
-	ActivitySearchList(ctx context.Context, cityCode, keyword string) (*ActivitySearchListResp, error)
-	// ActivityDetail 活动详情
-	ActivityDetail(ctx context.Context, activityId int) (*ActivityDetailResp, error)
-	// ActivityTicketList 获取票务场次信息
-	ActivityTicketList(ctx context.Context, activityId int) (*ActivityTicketListResp, error)
-	// Confirm 确认购买
-	Confirm(ctx context.Context, activityId int, ticketId, ticketNum string) (*ConfirmResp, error)
-	// AdressList 地址列表
-	AdressList(ctx context.Context) (*AdressListResp, error)
-	// CpList 观演人列表
-	CpList(ctx context.Context, ticketId string) (*CpListResp, error)
-	OrderList(ctx context.Context, req *OrderListReq) (*OrderListResp, error)
-	// Order 下单
-	Order(ctx context.Context, req *OrderReq) (*OrderResp, error)
-	// CoreOrder 核心订单确认
-	CoreOrder(ctx context.Context, coreOrderKey string) (*OrderCoreResp, error)
-	// GetOrderResult 获取订单结果
-	GetOrderResult(ctx context.Context, orderJobKey string) (*GetOrderResultResp, error)
+	GetToken(context.Context) error
+	ActivitySearchList(context.Context, string, string) (*ActivitySearchListResp, error)
+	ActivityDetail(context.Context, int) (*ActivityDetailResp, error)
+	ActivityTicketList(context.Context, int) (*ActivityTicketListResp, error)
+	Confirm(context.Context, int, string, string) (*ConfirmResp, error)
+	AdressList(context.Context) (*AdressListResp, error)
+	CpList(context.Context, string) (*CpListResp, error)
+	OrderList(context.Context, *OrderListReq) (*OrderListResp, error)
+	Order(context.Context, *OrderReq) (*OrderResp, error)
+	CoreOrder(context.Context, string) (*OrderCoreResp, error)
+	GetOrderResult(context.Context, string) (*GetOrderResultResp, error)
 }
 
-// GetToken 获取token
 func (c *ShowStartClient) GetToken(ctx context.Context) error {
-	path := "/waf/gettoken"
-	data := fmt.Sprintf(`{"st_flpv":"%s","sign":"%s","trackPath":""}`, c.StFlpv, c.Sign)
-
-	result, err := c.Post(ctx, path, data)
+	c.tokenRefreshMu.Lock()
+	defer c.tokenRefreshMu.Unlock()
+	c.refreshAuthFromStateFileIfNeeded()
+	c.authStateMu.Lock()
+	auth := *c.ClientHeaderConfig
+	c.authStateMu.Unlock()
+	raw, err := c.postWithAuth(ctx, "/waf/gettoken", `{"trackPath":""}`, &auth)
 	if err != nil {
 		return err
 	}
-
-	// 添加 GetToken 的返回值到Debug日志中
-	log.Logger.Debug("GetToken:" + string(result))
-
-	var resp *GetTokenResp
-	err = jsoniter.Unmarshal(result, &resp)
-	if err != nil {
+	var resp GetTokenResp
+	if err = json.Unmarshal(raw, &resp); err != nil {
 		return err
 	}
-
-	if !resp.Success {
-		return errors.New(resp.Msg)
+	if resp.ShowStartCommonResp == nil || (!resp.Success && resp.State != "1") || resp.Result.AccessToken.AccessToken == "" || resp.Result.IDToken.IDToken == "" {
+		return errors.New("token response invalid or rejected")
 	}
-
+	c.authStateMu.Lock()
+	defer c.authStateMu.Unlock()
+	if *c.ClientHeaderConfig != auth {
+		return errors.New("credentials changed during token refresh; discard stale response")
+	}
 	c.Cusat = resp.Result.AccessToken.AccessToken
 	c.Cusit = resp.Result.IDToken.IDToken
-
 	return nil
 }
 
-// ActivityDetail 获取活动详情
-func (c *ShowStartClient) ActivityDetail(ctx context.Context, activityId int) (*ActivityDetailResp, error) {
-	path := "/wap/activity/details"
-	data := fmt.Sprintf(`{"activityId":"%d","coupon":"","shareId":"","st_flpv":"%s","sign":"%s","trackPath":""}`,
-		activityId, c.StFlpv, c.Sign)
-
-	result, err := c.Post(ctx, path, data)
+// Reads may refresh once after a confirmed auth refusal. They never recurse.
+func (c *ShowStartClient) read(ctx context.Context, path string, body any, out any) error {
+	raw, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	var resp *ActivityDetailResp
-	err = jsoniter.Unmarshal(result, &resp)
-	if err != nil {
-		return nil, err
-	}
-	if resp.State == "token-expire-at" || resp.Msg == "登录过期了，请重新登录！" {
-		err = c.GetToken(ctx)
+	for attempt := 0; attempt < 2; attempt++ {
+		result, err := c.Post(ctx, path, string(raw))
 		if err != nil {
-			return nil, err
+			return err
 		}
-		return c.ActivityDetail(ctx, activityId)
-	}
-
-	if resp.State != "1" {
-		return nil, errors.New(resp.Msg)
-	}
-
-	return resp, nil
-}
-
-// ActivityTicketList 获取票务场次信息
-func (c *ShowStartClient) ActivityTicketList(ctx context.Context, activityId int) (*ActivityTicketListResp, error) {
-	path := "/wap/activity/V2/ticket/list"
-	data := fmt.Sprintf(`{"activityId":"%d","coupon":"","st_flpv":"%s","sign":"%s","trackPath":""}`,
-		activityId, c.StFlpv, c.Sign)
-
-	result, err := c.Post(ctx, path, data)
-	if err != nil {
-		return nil, err
-	}
-
-	var resp *ActivityTicketListResp
-	err = jsoniter.Unmarshal(result, &resp)
-	if err != nil {
-		return nil, err
-	}
-	if resp.State == "token-expire-at" || resp.Msg == "登录过期了，请重新登录！" {
-		err = c.GetToken(ctx)
-		if err != nil {
-			return nil, err
+		var common ShowStartCommonResp
+		if err = json.Unmarshal(result, &common); err != nil {
+			return err
 		}
-		return c.ActivityTicketList(ctx, activityId)
-	}
-
-	if resp.State != "1" {
-		return nil, errors.New(resp.Msg)
-	}
-
-	return resp, nil
-}
-
-// Confirm 确认购买
-func (c *ShowStartClient) Confirm(ctx context.Context, activityId int, ticketId, ticketNum string) (*ConfirmResp, error) {
-	path := "/order/wap/order/confirm"
-	body := fmt.Sprintf(`{"ticketId":"%s","sequence":"%d","ticketNum":"%s","st_flpv":"%s","sign":"%s","trackPath":""}`,
-		ticketId, activityId, ticketNum, c.StFlpv, c.Sign)
-
-	result, err := c.Post(ctx, path, body)
-	if err != nil {
-		return nil, err
-	}
-
-	// 将 Confirm 的返回值打印到Debug日志中
-	log.Logger.Debug("Confirm:" + string(result))
-
-	var resp *ConfirmResp
-	err = jsoniter.Unmarshal(result, &resp)
-	if err != nil {
-		return nil, err
-	}
-	if resp.State == "token-expire-at" || resp.Msg == "登录过期了，请重新登录！" {
-		err = c.GetToken(ctx)
-		if err != nil {
-			return nil, err
+		if common.State == "token-expire-at" || common.Msg == "登录过期了，请重新登录！" {
+			if attempt == 1 {
+				return errors.New("authentication rejected after one refresh")
+			}
+			if err = c.GetToken(ctx); err != nil {
+				return err
+			}
+			continue
 		}
-		return c.Confirm(ctx, activityId, ticketId, ticketNum)
-	}
-
-	return resp, nil
-}
-
-// AdressList 地址列表
-func (c *ShowStartClient) AdressList(ctx context.Context) (*AdressListResp, error) {
-	path := "/wap/address/list"
-	data := fmt.Sprintf(`{"st_flpv":"%s","sign":"%s","trackPath":""}`, c.StFlpv, c.Sign)
-
-	result, err := c.Post(ctx, path, data)
-	if err != nil {
-		return nil, err
-	}
-
-	var resp *AdressListResp
-	err = jsoniter.Unmarshal(result, &resp)
-	if err != nil {
-		return nil, err
-	}
-	if resp.State == "token-expire-at" || resp.Msg == "登录过期了，请重新登录！" {
-		err = c.GetToken(ctx)
-		if err != nil {
-			return nil, err
+		if !common.Success && common.State != "1" {
+			return fmt.Errorf("business rejected: %s", common.Msg)
 		}
-		return c.AdressList(ctx)
+		return json.Unmarshal(result, out)
 	}
-
-	return resp, nil
-}
-
-// CpList 观演人列表
-func (c *ShowStartClient) CpList(ctx context.Context, ticketId string) (*CpListResp, error) {
-	path := "/wap/cp/list"
-	data := fmt.Sprintf(`{"ticketPriceId":"%s","audienceWhitelistPolicy":0,"st_flpv":"%s","sign":"%s","trackPath":""}`,
-		ticketId, c.StFlpv, c.Sign)
-
-	result, err := c.Post(ctx, path, data)
-	if err != nil {
-		return nil, err
-	}
-
-	var resp *CpListResp
-	err = jsoniter.Unmarshal(result, &resp)
-	if err != nil {
-		return nil, err
-	}
-	if resp.State == "token-expire-at" || resp.Msg == "登录过期了，请重新登录！" {
-		err = c.GetToken(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return c.CpList(ctx, ticketId)
-	}
-
-	return resp, nil
-}
-
-func (c *ShowStartClient) OrderList(ctx context.Context, req *OrderListReq) (*OrderListResp, error) {
-	path := "/nj/coupon/order_list"
-	data, err := jsoniter.MarshalToString(req)
-	if err != nil {
-		return nil, err
-	}
-	//e = "{\"orderDetails\":[{\"goodsType\":1,\"skuType\":1,\"num\":\"1\",\"goodsId\":233792,\"skuId\":\"5f62b72525b041791b237911d064609a\",\"price\":188,\"goodsPhoto\":\"https://s2.showstart.com/img/2024/0703/15/30/00f9cd985a664df2b38797b2dcd78558_1200_1600_3167694.0x0.png\",\"dyPOIType\":2,\"goodsName\":\"SFNT「City Walk 都市漫游」巡回演唱会 -深圳站\"}],\"commonPerfomerIds\":[5773864],\"areaCode\":\"86_CN\",\"telephone\":\"15813830747\",\"addressId\":\"\",\"teamId\":\"\",\"couponId\":\"\",\"checkCode\":\"\",\"source\":0,\"discount\":0,\"sessionId\":3249212,\"freight\":0,\"amountPayable\":\"188.00\",\"totalAmount\":\"188.00\",\"partner\":\"\",\"orderSource\":1,\"videoId\":\"\",\"payVideotype\":\"\",\"st_flpv\":\"kgUBxCv3t7EN1wWr6Yeo\",\"sign\":\"f65f2dbcd7387b2376bcefe13754856b\",\"trackPath\":\"\"}", n = "341sW411imd3cgg7"
-
-	result, err := c.Post(ctx, path, data)
-	if err != nil {
-		return nil, err
-	}
-
-	var resp *OrderListResp
-	err = jsoniter.Unmarshal(result, &resp)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.State == "token-expire-at" || resp.Msg == "登录过期了，请重新登录！" {
-		err = c.GetToken(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return c.OrderList(ctx, req)
-	}
-
-	return resp, nil
-}
-
-func (c *ShowStartClient) Order(ctx context.Context, req *OrderReq) (*OrderResp, error) {
-	req.StFlpv = c.StFlpv
-	req.Sign = c.Sign
-
-	path := "/nj/order/order"
-	data, err := jsoniter.MarshalToString(req)
-	if err != nil {
-		return nil, err
-	}
-	result, err := c.Post(ctx, path, data)
-	if err != nil {
-		return nil, err
-	}
-
-	// 将 Order 的返回值打印到Debug日志中
-	log.Logger.Debug("Order:" + string(result))
-
-	var resp *OrderResp
-	err = jsoniter.Unmarshal(result, &resp)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.State == "token-expire-at" || resp.Msg == "登录过期了，请重新登录！" {
-		err = c.GetToken(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return c.Order(ctx, req)
-	}
-
-	if resp.Success || resp.State == "1" {
-		return resp, nil
-	}
-
-	return nil, errors.New(resp.Msg)
-}
-
-// 未使用
-func (c *ShowStartClient) CoreOrder(ctx context.Context, coreOrderKey string) (*OrderCoreResp, error) {
-	path := "/nj/order/coreOrder"
-
-	body := fmt.Sprintf(`{"coreOrderKey":"%s","st_flpv":"%s","sign":"%s","trackPath":""}`, coreOrderKey, c.StFlpv, c.Sign)
-
-	result, err := c.Post(ctx, path, body)
-	if err != nil {
-		return nil, err
-	}
-
-	var resp *OrderCoreResp
-	err = jsoniter.Unmarshal(result, &resp)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.State == "token-expire-at" || resp.Msg == "登录过期了，请重新登录！" {
-		err = c.GetToken(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return c.CoreOrder(ctx, coreOrderKey)
-	}
-
-	if resultStr, ok := resp.Result.(string); ok {
-		if resultStr == "pending" {
-			time.Sleep(200 * time.Millisecond)
-			return c.CoreOrder(ctx, coreOrderKey)
-		}
-	}
-
-	return resp, nil
-}
-
-func (c *ShowStartClient) GetOrderResult(ctx context.Context, orderJobKey string) (*GetOrderResultResp, error) {
-	path := "/nj/order/getOrderResult"
-
-	body := fmt.Sprintf(`{"orderJobKey":"%s","st_flpv":"%s","sign":"%s","trackPath":""}`, orderJobKey, c.StFlpv, c.Sign)
-
-	result, err := c.Post(ctx, path, body)
-	if err != nil {
-		return nil, err
-	}
-
-	// 将 GetOrderResult 的返回值打印到Debug日志中
-	log.Logger.Debug("GetOrderResult: " + string(result))
-
-	// 修复返回值为 pending 时的解析问题
-	type CommonResp struct {
-		Success bool        `json:"success"`
-		Result  interface{} `json:"result"`
-	}
-
-	var commonResp CommonResp
-	err = jsoniter.Unmarshal(result, &commonResp)
-	if err != nil {
-		return nil, err
-	}
-
-	if commonResp.Success && commonResp.Result == "pending" {
-		// 如果 success 为 true 且 result 为 "pending"，则等待 200ms 后再次查询
-		time.Sleep(200 * time.Millisecond)
-		return c.GetOrderResult(ctx, orderJobKey)
-	}
-
-	// 否则，继续解析为 GetOrderResultResp
-	var resp GetOrderResultResp
-	err = jsoniter.Unmarshal(result, &resp)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.State == "token-expire-at" || resp.Msg == "登录过期了，请重新登录！" {
-		err = c.GetToken(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return c.GetOrderResult(ctx, orderJobKey)
-	}
-
-	if resp.Success || resp.State == "1" {
-		return &resp, nil
-	}
-
-	return nil, errors.New(resp.Msg)
+	return errors.New("authentication rejected")
 }
 
 func (c *ShowStartClient) ActivitySearchList(ctx context.Context, cityCode, keyword string) (*ActivitySearchListResp, error) {
-	path := "/wap/activity/list"
-	body := fmt.Sprintf(`{"pageNo":1,"cityCode":"%s","keyword":"%s","style":"","activityIds":"","couponCode":"","performerId":"","hosterId":"","siteId":"","tag":"","tourId":"","themeId":"","st_flpv":"%s","sign":"%s","trackPath":""}`,
-		cityCode, keyword, c.StFlpv, c.Sign)
+	var out ActivitySearchListResp
+	err := c.read(ctx, "/wap/activity/list", map[string]any{"pageNo": 1, "cityCode": cityCode, "keyword": keyword, "style": "", "activityIds": "", "couponCode": "", "performerId": "", "hosterId": "", "siteId": "", "tag": "", "tourId": "", "themeId": "", "trackPath": ""}, &out)
+	return &out, err
+}
 
-	result, err := c.Post(ctx, path, body)
+func (c *ShowStartClient) ActivityDetail(ctx context.Context, id int) (*ActivityDetailResp, error) {
+	var out ActivityDetailResp
+	err := c.read(ctx, "/wap/activity/details", map[string]any{"activityId": fmt.Sprint(id), "coupon": "", "shareId": "", "trackPath": ""}, &out)
+	return &out, err
+}
+
+func (c *ShowStartClient) ActivityTicketList(ctx context.Context, id int) (*ActivityTicketListResp, error) {
+	var out ActivityTicketListResp
+	err := c.read(ctx, "/wap/activity/V2/ticket/list", map[string]any{"activityId": fmt.Sprint(id), "coupon": "", "trackPath": ""}, &out)
+	return &out, err
+}
+
+func (c *ShowStartClient) Confirm(ctx context.Context, id int, ticketID, num string) (*ConfirmResp, error) {
+	var out ConfirmResp
+	err := c.read(ctx, "/order/wap/order/confirm", map[string]any{"sequence": fmt.Sprint(id), "ticketId": ticketID, "ticketNum": num, "trackPath": ""}, &out)
+	return &out, err
+}
+
+func (c *ShowStartClient) AdressList(ctx context.Context) (*AdressListResp, error) {
+	var out AdressListResp
+	err := c.read(ctx, "/wap/address/list", map[string]any{"trackPath": ""}, &out)
+	return &out, err
+}
+
+func (c *ShowStartClient) CpList(ctx context.Context, ticketID string) (*CpListResp, error) {
+	var out CpListResp
+	err := c.read(ctx, "/wap/cp/list", map[string]any{"ticketPriceId": ticketID, "audienceWhitelistPolicy": 0, "trackPath": ""}, &out)
+	return &out, err
+}
+
+func (c *ShowStartClient) OrderList(ctx context.Context, req *OrderListReq) (*OrderListResp, error) {
+	var out OrderListResp
+	err := c.read(ctx, "/nj/coupon/order_list", req, &out)
+	return &out, err
+}
+
+func (*ShowStartClient) Order(context.Context, *OrderReq) (*OrderResp, error) {
+	return nil, ErrUnsafeLegacySubmit
+}
+func (*ShowStartClient) CoreOrder(context.Context, string) (*OrderCoreResp, error) {
+	return nil, ErrUnsafeLegacySubmit
+}
+
+// A single read returns pending to its owner. There is no recursive wait or
+// authentication retry that could accumulate goroutines.
+func (c *ShowStartClient) GetOrderResult(ctx context.Context, key string) (*GetOrderResultResp, error) {
+	if key == "" {
+		return nil, errors.New("orderJobKey cannot be empty")
+	}
+	raw, _ := json.Marshal(map[string]string{"orderJobKey": key, "trackPath": ""})
+	data, err := c.Post(ctx, "/nj/order/getOrderResult", string(raw))
 	if err != nil {
 		return nil, err
 	}
-
-	var resp ActivitySearchListResp
-	if err := jsoniter.Unmarshal(result, &resp); err != nil {
+	var envelope struct {
+		ShowStartCommonResp
+		Result json.RawMessage `json:"result"`
+	}
+	if err = json.Unmarshal(data, &envelope); err != nil {
 		return nil, err
 	}
-
-	if resp.State == "token-expire-at" || resp.Msg == "登录过期了，请重新登录！" {
-		if err := c.GetToken(ctx); err != nil {
-			return nil, err
-		}
-		return c.ActivitySearchList(ctx, cityCode, keyword)
+	if string(envelope.Result) == `"pending"` {
+		return nil, ErrOrderPending
 	}
-
-	if resp.State != "1" {
-		return nil, errors.New(resp.Msg)
+	if !envelope.Success && envelope.State != "1" {
+		return nil, errors.New("order result unresolved or rejected")
 	}
-
-	return &resp, nil
+	var out GetOrderResultResp
+	if err = json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	if out.Result.OrderID == "" && out.Result.OrderSn == "" {
+		return nil, errors.New("order result lacks order ID")
+	}
+	return &out, nil
 }

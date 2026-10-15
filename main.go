@@ -50,6 +50,35 @@ func main() {
 	}
 	log.Logger.Info("✅ 系统初始化配置完成！")
 
+	// 测试模式：测试观演人匹配功能
+	if os.Getenv("TEST_PERFORMER") == "true" {
+		testActivityID := os.Getenv("TEST_ACTIVITY_ID")
+		testTicketID := os.Getenv("TEST_TICKET_ID")
+
+		if testActivityID == "" || testTicketID == "" {
+			fmt.Println("❌ 测试模式需要设置环境变量：")
+			fmt.Println("   TEST_ACTIVITY_ID=<活动ID>")
+			fmt.Println("   TEST_TICKET_ID=<票务ID>")
+			fmt.Println("\n示例：")
+			fmt.Println("   TEST_PERFORMER=true TEST_ACTIVITY_ID=123456 TEST_TICKET_ID=abc123 ./showstart_monitor")
+			return
+		}
+
+		var activityID int
+		if _, err := fmt.Sscanf(testActivityID, "%d", &activityID); err != nil {
+			log.Logger.Error("活动ID格式错误", zap.String("activityId", testActivityID), zap.Error(err))
+			return
+		}
+
+		log.Logger.Info("🧪 进入测试模式：测试观演人匹配功能")
+		if err := monitor.TestPerformerMatching(ctx, cfg, activityID, testTicketID); err != nil {
+			log.Logger.Error("测试失败", zap.Error(err))
+			os.Exit(1)
+		}
+		log.Logger.Info("✅ 测试完成")
+		return
+	}
+
 	if cfg.Monitor != nil && cfg.Monitor.Enable {
 		service, err := monitor.NewService(ctx, cfg)
 		if err != nil {
@@ -69,7 +98,7 @@ func main() {
 		}
 
 		log.Logger.Info("👍 开始进入监控模式，按 Ctrl+C 退出")
-		
+
 		// 创建可取消的上下文
 		monitorCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
@@ -107,18 +136,39 @@ func main() {
 	}
 
 	cancelCtx, cancel := context.WithCancel(ctx)
+
+	// 获取有效账号列表
+	accounts := cfg.GetEffectiveAccounts()
+	if len(accounts) == 0 {
+		log.Logger.Error("❌ 未找到有效的账号配置")
+		return
+	}
+
+	log.Logger.Info(fmt.Sprintf("📋 检测到 %d 个抢票账号", len(accounts)))
+	for i, acc := range accounts {
+		log.Logger.Info(fmt.Sprintf("  [%d] %s - 观演人: %v", i+1, acc.Name, acc.People))
+	}
+
+	// 为每个账号启动抢票流程
 	for _, ticket := range buyTicketList {
-		err = ConfirmOrder(cancelCtx, &OrderDetail{
+		order := &OrderDetail{
 			ActivityName: ticket.ActivityName,
 			SessionName:  ticket.SessionName,
 			Price:        ticket.Ticket.SellingPrice,
 			ActivityID:   cfg.Ticket.ActivityId,
 			GoodType:     ticket.Ticket.GoodType,
 			TicketID:     ticket.Ticket.TicketID,
-		}, cfg)
-		if err != nil {
-			log.Logger.Error("❌ 抢票失败！！！程序结束")
-			return
+		}
+
+		// 多账号模式：为每个账号启动独立的抢票协程
+		for _, account := range accounts {
+			log.Logger.Info(fmt.Sprintf("[%s] 🎫 准备抢票: %s", account.Name, ticket.ActivityName))
+			err = ConfirmOrderForAccount(cancelCtx, order, account, cfg)
+			if err != nil {
+				log.Logger.Error(fmt.Sprintf("[%s] ❌ 抢票准备失败", account.Name), zap.Error(err))
+				// 单个账号失败不影响其他账号
+				continue
+			}
 		}
 	}
 
@@ -126,16 +176,40 @@ func main() {
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, syscall.SIGINT, syscall.SIGTERM)
 
+	// 监听多账号结果和单账号结果
 	select {
+	case result := <-GlobalResultChan:
+		cancel()
+		if result.Success {
+			log.Logger.Info(fmt.Sprintf("🎉 [%s] 抢票成功！赶紧去订单页面支付吧！！🎉", result.AccountName))
+			// 下单成功，发送邮件提醒
+			if cfg.SmtpEmail.Enable && result.Order != nil {
+				subject := vars.GetEmailTitle()
+				body := fmt.Sprintf("[账号: %s]\n%s", result.AccountName,
+					vars.GetEmailFormat(result.Order.ActivityName, result.Order.SessionName, result.Order.Price))
+				if err := sendEmail(subject, body, cfg); err != nil {
+					log.Logger.Error("发送邮件失败：", zap.Error(err))
+				} else {
+					log.Logger.Info("下单成功，邮件已发送")
+				}
+			}
+		} else {
+			log.Logger.Error(fmt.Sprintf("❌ [%s] 抢票失败", result.AccountName), zap.Error(result.Error))
+			if cfg.SmtpEmail.Enable {
+				subject := fmt.Sprintf("[%s] 抢票失败", result.AccountName)
+				body := fmt.Sprintf("错误信息：%v", result.Error)
+				if err := sendEmail(subject, body, cfg); err != nil {
+					log.Logger.Error("发送邮件失败：", zap.Error(err))
+				}
+			}
+		}
 	case order := <-channel:
+		// 向后兼容：单账号模式的结果通道
 		cancel()
 		log.Logger.Info("🎉抢票成功！赶紧去订单页面支付吧！！🎉")
-		// 下单成功，发送邮件提醒
 		if cfg.SmtpEmail.Enable {
 			subject := vars.GetEmailTitle()
-
 			body := vars.GetEmailFormat(order.ActivityName, order.SessionName, order.Price)
-
 			if err := sendEmail(subject, body, cfg); err != nil {
 				log.Logger.Error("发送邮件失败：", zap.Error(err))
 			} else {
@@ -143,14 +217,12 @@ func main() {
 			}
 		}
 	case Error := <-ErrorChannel:
+		// 向后兼容：单账号模式的错误通道
 		cancel()
 		log.Logger.Error("❌ 抢票失败！！！程序结束")
-		// 下单失败，发送邮件提醒
 		if cfg.SmtpEmail.Enable {
 			subject := "抢票初始化失败，请查看错误，并及时处理重启程序！！！"
-
 			body := fmt.Sprintf("错误信息：%s", Error.Error())
-
 			if err := sendEmail(subject, body, cfg); err != nil {
 				log.Logger.Error("发送邮件失败：", zap.Error(err))
 			} else {

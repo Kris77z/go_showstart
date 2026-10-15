@@ -71,6 +71,10 @@ func (n *Notifier) Send(message string) error {
 
 // SendStructured 发送结构化通知（支持 Echobell 模板）
 func (n *Notifier) SendStructured(eventType, artist, title, showTime, siteName, activityURL string) error {
+	return n.SendStructuredWithExtra(eventType, artist, title, showTime, siteName, activityURL, nil)
+}
+
+func (n *Notifier) SendStructuredWithExtra(eventType, artist, title, showTime, siteName, activityURL string, extra map[string]interface{}) error {
 	if len(n.webhooks) == 0 {
 		return fmt.Errorf("未配置 webhook_url")
 	}
@@ -83,6 +87,9 @@ func (n *Notifier) SendStructured(eventType, artist, title, showTime, siteName, 
 		"showTime": showTime,    // 演出时间
 		"siteName": siteName,    // 场馆名称
 		"url":      activityURL, // 演出链接（可选）
+	}
+	for key, value := range extra {
+		payload[key] = value
 	}
 
 	body, err := json.Marshal(payload)
@@ -136,6 +143,34 @@ func (n *Notifier) SendAlert(message string) error {
 		resp.Body.Close()
 		if resp.StatusCode >= 300 {
 			lastErr = fmt.Errorf("alert webhook 返回异常状态: %d", resp.StatusCode)
+		}
+	}
+
+	return lastErr
+}
+
+// SendStructuredPurchase 发送抢票成功通知（结构化数据，支持 Echobell 标题和内容分离）
+func (n *Notifier) SendStructuredPurchase(data map[string]interface{}) error {
+	if len(n.webhooks) == 0 {
+		return fmt.Errorf("未配置 webhook_url")
+	}
+
+	body, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+
+	var lastErr error
+	for _, webhook := range n.webhooks {
+		resp, err := http.Post(webhook, "application/json", bytes.NewReader(body))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode >= 300 {
+			lastErr = fmt.Errorf("webhook 返回异常状态: %d", resp.StatusCode)
 		}
 	}
 

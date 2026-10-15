@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -15,12 +16,14 @@ import (
 )
 
 type Service struct {
-	client   client.ShowStartIface
-	state    *StateManager
-	notifier *Notifier
-	cfg      *config.Monitor
-	interval time.Duration
-	location *time.Location
+	client          client.ShowStartIface
+	state           *StateManager
+	notifier        *Notifier
+	cfg             *config.Monitor
+	interval        time.Duration
+	location        *time.Location
+	purchaseService *PurchaseService // 自动抢票服务（可选）
+	fullCfg         *config.Config   // 完整配置（用于自动抢票）
 }
 
 func NewService(ctx context.Context, cfg *config.Config) (*Service, error) {
@@ -30,12 +33,18 @@ func NewService(ctx context.Context, cfg *config.Config) (*Service, error) {
 	if cfg.Showstart == nil {
 		return nil, fmt.Errorf("缺少 showstart 配置")
 	}
+	if cfg.Monitor.AutoPurchaseEnable {
+		return nil, client.ErrUnsafeLegacySubmit
+	}
 
+	log.Logger.Info("初始化监控客户端")
 	cl := client.NewShowStartClient(ctx, cfg.Showstart)
+	log.Logger.Info("读取监控状态", zap.String("stateDir", cfg.Monitor.StateDir))
 	state, err := NewStateManager(cfg.Monitor.StateDir)
 	if err != nil {
 		return nil, err
 	}
+	log.Logger.Info("监控状态读取完成")
 	interval := time.Duration(cfg.Monitor.IntervalSecond) * time.Second
 	if interval <= 0 {
 		interval = 180 * time.Second
@@ -46,14 +55,25 @@ func NewService(ctx context.Context, cfg *config.Config) (*Service, error) {
 		loc = time.FixedZone("CST", 8*3600)
 	}
 
-	return &Service{
+	service := &Service{
 		client:   cl,
 		state:    state,
 		notifier: NewNotifier(cfg.Monitor.WebhookURL, cfg.Monitor.AlertWebhookURL),
 		cfg:      cfg.Monitor,
 		interval: interval,
 		location: loc,
-	}, nil
+		fullCfg:  cfg,
+	}
+
+	// 如果启用自动抢票，初始化抢票服务（使用独立的 client 实例，避免影响监控）
+	if cfg.Monitor.AutoPurchaseEnable {
+		// 创建独立的 client 实例，确保抢票不影响监控的 client
+		purchaseClient := client.NewShowStartClient(ctx, cfg.Showstart)
+		service.purchaseService = NewPurchaseService(purchaseClient, cfg, service.notifier)
+		log.Logger.Info("✅ 自动抢票功能已启用")
+	}
+
+	return service, nil
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -97,10 +117,16 @@ func (s *Service) RunOnce(ctx context.Context) error {
 }
 
 func (s *Service) runOnce(ctx context.Context) error {
-	for _, keyword := range s.cfg.Keywords {
+	for i, keyword := range s.cfg.Keywords {
 		if err := s.monitorKeyword(ctx, keyword); err != nil {
 			log.Logger.Error("监控单个关键词失败", zap.String("keyword", keyword), zap.Error(err))
 		}
+
+		// 在每个关键词之间添加延迟（除了最后一个），模拟真实搜索操作
+		if i < len(s.cfg.Keywords)-1 {
+			time.Sleep(1000 * time.Millisecond) // 每个关键词间隔 1 秒
+		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -136,31 +162,144 @@ func (s *Service) monitorKeyword(ctx context.Context, keyword string) error {
 			continue
 		}
 
-		s.processTimedActivity(activity, keyword)
+		// 先处理新上架通知
+		s.processNewActivity(activity, keyword)
+		// 再处理定时购通知（如果支持定时购）
+		s.processTimedActivity(ctx, activity, keyword)
 	}
 
 	return nil
 }
 
-func (s *Service) processTimedActivity(activity *client.ActivityInfo, keyword string) {
+// processNewActivity 处理新上架活动通知
+func (s *Service) processNewActivity(activity *client.ActivityInfo, keyword string) {
+	activityID := fmt.Sprintf("%d", activity.ActivityID)
+
+	// 如果已经见过这个活动，跳过
+	if s.state.HasSeen(activityID) {
+		return
+	}
+
+	activityURL := fmt.Sprintf("https://wap.showstart.com/pages/activity/detail/detail?activityId=%d", activity.ActivityID)
+	if err := s.notifier.SendStructured("new", keyword, activity.Title, activity.ShowTime, activity.SiteName, activityURL); err != nil {
+		log.Logger.Error("Webhook 通知失败", zap.String("type", "new_listing"), zap.Error(err))
+		return
+	}
+
+	// 记录到已见过列表
+	s.state.MarkSeen(activityID)
+	log.Logger.Info("发现新演出上架",
+		zap.String("keyword", keyword),
+		zap.String("activityId", activityID),
+		zap.String("title", activity.Title))
+
+	// 输出便于测试的信息
+	fmt.Printf("\n" + strings.Repeat("=", 60) + "\n")
+	fmt.Printf("🎉 发现新演出上架\n")
+	fmt.Printf("活动ID: %s\n", activityID)
+	fmt.Printf("活动名称: %s\n", activity.Title)
+	fmt.Printf("关键词: %s\n", keyword)
+	fmt.Printf(strings.Repeat("=", 60) + "\n\n")
+}
+
+func (s *Service) processTimedActivity(ctx context.Context, activity *client.ActivityInfo, keyword string) {
 	activityID := fmt.Sprintf("%d", activity.ActivityID)
 
 	if !hasTimedLabel(activity.OtherLabel) {
 		return
 	}
 
+	activityURL := fmt.Sprintf("https://wap.showstart.com/pages/activity/detail/detail?activityId=%d", activity.ActivityID)
 	if s.state.HasTimed(activityID) {
 		return
 	}
 
-	activityURL := fmt.Sprintf("https://wap.showstart.com/pages/activity/detail/detail?activityId=%d", activity.ActivityID)
-	if err := s.notifier.SendStructured("timed", keyword, activity.Title, activity.ShowTime, activity.SiteName, activityURL); err != nil {
+	snapshot := s.fetchTimedTicketSnapshot(ctx, activity)
+	successRateText := timedNotificationSuccessRateText(snapshot)
+
+	notifyTitle := activity.Title
+	var extra map[string]interface{}
+	successRateForLog := "-"
+	if successRateText != "" {
+		notifyTitle += "\n成功率：" + successRateText
+		successRateForLog = successRateText
+		extra = map[string]interface{}{
+			"successRate":     formatRate(snapshot.BestPreBuyRate),
+			"successRateText": successRateText,
+		}
+	} else {
+		log.Logger.Info("定时购未返回成功率，按基础定时购推送",
+			zap.String("keyword", keyword),
+			zap.String("activityId", activityID),
+			zap.String("title", activity.Title))
+	}
+
+	if err := s.notifier.SendStructuredWithExtra("timed", keyword, notifyTitle, activity.ShowTime, activity.SiteName, activityURL, extra); err != nil {
 		log.Logger.Error("Webhook 通知失败", zap.String("type", "timed_purchase"), zap.Error(err))
 		return
 	}
 
-	s.state.BatchMark([]string{activityID}, []string{activityID})
-	log.Logger.Info("发现定时购", zap.String("keyword", keyword), zap.String("activityId", activityID), zap.String("title", activity.Title))
+	// 记录到定时购列表，同时确保也记录到已见过列表（避免重复通知）
+	s.state.MarkTimed(activityID)
+	if !s.state.HasSeen(activityID) {
+		s.state.MarkSeen(activityID)
+	}
+	log.Logger.Info("发现定时购",
+		zap.String("keyword", keyword),
+		zap.String("activityId", activityID),
+		zap.String("title", activity.Title),
+		zap.String("successRate", successRateForLog))
+
+	// 输出便于测试的信息
+	fmt.Printf("\n" + strings.Repeat("=", 60) + "\n")
+	fmt.Printf("🎯 发现定时购活动（可用于测试）\n")
+	fmt.Printf("活动ID: %s\n", activityID)
+	fmt.Printf("活动名称: %s\n", activity.Title)
+	fmt.Printf("关键词: %s\n", keyword)
+	fmt.Printf("成功率: %s\n", successRateForLog)
+	fmt.Printf(strings.Repeat("=", 60) + "\n\n")
+
+	// 如果启用自动抢票，异步启动抢票流程（完全隔离，不影响监控）
+	// 注意：AutoPurchaseEnable 默认为 false，旧配置文件不包含此字段时不会触发
+	if s.cfg != nil && s.cfg.AutoPurchaseEnable && s.purchaseService != nil {
+		// 使用独立的 context，避免抢票的取消影响监控
+		purchaseCtx := ctx
+		activityIDInt, err := strconv.Atoi(activityID)
+		if err == nil {
+			// 使用 defer recover 确保抢票启动失败不会影响监控
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Logger.Error("自动抢票启动异常（已恢复，不影响监控）",
+							zap.String("activityId", activityID),
+							zap.Any("panic", r))
+					}
+				}()
+				s.purchaseService.StartAutoPurchase(purchaseCtx, activityIDInt, activity.Title)
+			}()
+		} else {
+			log.Logger.Warn("活动ID转换失败，跳过自动抢票", zap.String("activityId", activityID), zap.Error(err))
+		}
+	}
+}
+
+func (s *Service) fetchTimedTicketSnapshot(ctx context.Context, activity *client.ActivityInfo) *TimedTicketSnapshot {
+	activityID := fmt.Sprintf("%d", activity.ActivityID)
+	ticketList, err := s.client.ActivityTicketList(ctx, activity.ActivityID)
+	if err != nil {
+		log.Logger.Warn("拉取定时购票档详情失败",
+			zap.String("activityId", activityID),
+			zap.String("title", activity.Title),
+			zap.Error(err))
+		return nil
+	}
+
+	snapshot := buildTimedTicketSnapshot(activityID, ticketList, s.location)
+	if len(snapshot.Tickets) == 0 {
+		log.Logger.Warn("定时购票档详情为空", zap.String("activityId", activityID), zap.String("title", activity.Title))
+		return nil
+	}
+	return snapshot
 }
 
 func (s *Service) ensureInitialized(ctx context.Context) {
