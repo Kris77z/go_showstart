@@ -27,27 +27,49 @@ type OrderDetail struct {
 	TicketID     string
 }
 
+// AccountOrderResult 用于多账号抢票时返回结果
+type AccountOrderResult struct {
+	AccountName string
+	Order       *OrderDetail
+	Success     bool
+	Error       error
+}
+
+// OrderContext 封装单个账号的抢票上下文
+type OrderContext struct {
+	AccountName         string
+	Client              client.ShowStartIface
+	People              []string
+	SystemConfig        *config.System
+	OrderJobKeyAcquired bool
+	OrderJobKeyLock     sync.Mutex
+	ResultChan          chan *AccountOrderResult
+}
+
+// 全局结果通道（用于向 main 返回所有账号的抢票结果）
+var GlobalResultChan = make(chan *AccountOrderResult, 10)
+
+// 以下保留用于向后兼容单账号模式
 var channel = make(chan *OrderDetail)
-
 var ErrorChannel = make(chan error)
-
 var orderJobKeyAcquired bool = false
-
-// 控制orderJobKeyAcquired的并发访问锁
 var orderJobKeyAcquiredLock = sync.Mutex{}
 
-func ConfirmOrder(ctx context.Context, order *OrderDetail, cfg *config.Config) error {
-	c := client.NewShowStartClient(ctx, cfg.Showstart)
+// ConfirmOrderForAccount 为指定账号执行抢票流程（多账号模式）
+func ConfirmOrderForAccount(ctx context.Context, order *OrderDetail, account *config.Account, cfg *config.Config) error {
+	logPrefix := fmt.Sprintf("[%s] ", account.Name)
+	c := client.NewShowStartClient(ctx, account.Showstart)
 
-	num := len(cfg.Ticket.People)
+	num := len(account.People)
+	log.Logger.Info(logPrefix + "开始准备抢票...")
 	//订单信息确认
 	confirm, err := c.Confirm(ctx, order.ActivityID, order.TicketID, fmt.Sprintf("%d", num))
 	if err != nil {
-		log.Logger.Error("❌ 订单信息确认失败：", zap.Error(err))
+		log.Logger.Error(logPrefix+"❌ 订单信息确认失败：", zap.Error(err))
 		return err
 	}
 
-	log.Logger.Info("👀订单信息确认成功！", zap.Any("ticket_id", order.TicketID))
+	log.Logger.Info(logPrefix+"👀订单信息确认成功！", zap.Any("ticket_id", order.TicketID))
 
 	pay := strconv.FormatFloat(confirm.Result.OrderInfoVo.TicketPriceVo.Price*float64(num), 'f', 2, 64)
 	//下单
@@ -88,35 +110,35 @@ func ConfirmOrder(ctx context.Context, order *OrderDetail, cfg *config.Config) e
 	}
 	//是否需要查询观演人
 	if vars.NeedCpMap[confirm.Result.OrderInfoVo.BuyType] {
-		log.Logger.Info(fmt.Sprintf("🏃票务类型为:%d ，匹配观演人信息中...", confirm.Result.OrderInfoVo.BuyType))
+		log.Logger.Info(logPrefix + fmt.Sprintf("🏃票务类型为:%d ，匹配观演人信息中...", confirm.Result.OrderInfoVo.BuyType))
 		//查询观演人信息
 		cpResp, err := c.CpList(ctx, order.TicketID)
 		if err != nil {
-			log.Logger.Error("❌ 查询观演人信息失败：", zap.Error(err))
+			log.Logger.Error(logPrefix+"❌ 查询观演人信息失败：", zap.Error(err))
 			return err
 		}
 
 		var perfomerIds []int
 		for _, v := range cpResp.Result {
-			for _, user := range cfg.Ticket.People {
+			for _, user := range account.People {
 				if v.Name == user {
 					perfomerIds = append(perfomerIds, v.ID)
 				}
 			}
 		}
 
-		if len(perfomerIds) > 0 && len(perfomerIds) == len(cfg.Ticket.People) {
-			log.Logger.Info("🙎观演人信息匹配成功！!")
+		if len(perfomerIds) > 0 && len(perfomerIds) == len(account.People) {
+			log.Logger.Info(logPrefix + "🙎观演人信息匹配成功！!")
 			orderReq.CommonPerfomerIds = perfomerIds
 		} else {
-			log.Logger.Error("❌ 观演人信息匹配失败")
+			log.Logger.Error(logPrefix + "❌ 观演人信息匹配失败")
 			return errors.New("观演人信息匹配失败")
 		}
 	} else {
-		log.Logger.Info(fmt.Sprintf("🏃票务类型为:%d ，无需选择观演人 ", confirm.Result.OrderInfoVo.BuyType))
+		log.Logger.Info(logPrefix + fmt.Sprintf("🏃票务类型为:%d ，无需选择观演人 ", confirm.Result.OrderInfoVo.BuyType))
 	}
 
-	log.Logger.Info(fmt.Sprintf("👪观演人数：%d（请注意活动的购票数量限制！）", num))
+	log.Logger.Info(logPrefix + fmt.Sprintf("👪观演人数：%d（请注意活动的购票数量限制！）", num))
 
 	//是否需要填写地址
 	if vars.NeedAdress[confirm.Result.OrderInfoVo.TicketPriceVo.TicketType] {
@@ -167,9 +189,17 @@ func ConfirmOrder(ctx context.Context, order *OrderDetail, cfg *config.Config) e
 		case <-ctx.Done():
 			return
 		case <-time.After(time.Duration(since) * time.Millisecond):
-			log.Logger.Info("🚀活动即将开始，开始监听抢票！！！")
+			log.Logger.Info(logPrefix + "🚀活动即将开始，开始监听抢票！！！")
+			// 为该账号创建独立的上下文
+			octx := &OrderContext{
+				AccountName:  account.Name,
+				Client:       c,
+				People:       account.People,
+				SystemConfig: cfg.System,
+				ResultChan:   GlobalResultChan,
+			}
 			for i := 0; i < cfg.System.MaxGoroutine; i++ {
-				go GoOrder(ctx, i, c, orderReq, cfg, order)
+				go GoOrderForAccount(ctx, i, octx, orderReq, order)
 			}
 		}
 	}
@@ -187,7 +217,7 @@ func ConfirmOrder(ctx context.Context, order *OrderDetail, cfg *config.Config) e
 			since = (startTime - time.Now().UnixNano()/int64(time.Millisecond))
 			// 加入 ctx.Done() 退出
 			for since > 0 && ctx.Err() == nil {
-				log.Logger.Info(fmt.Sprintf("🕒 距离抢票开始还有：%d秒", since/1000))
+				log.Logger.Info(logPrefix + fmt.Sprintf("🕒 距离抢票开始还有：%d秒", since/1000))
 				time.Sleep(1 * time.Second)
 				since -= 1000
 			}
@@ -211,12 +241,16 @@ func ConfirmOrder(ctx context.Context, order *OrderDetail, cfg *config.Config) e
 			// token 重新获取
 			err := c.GetToken(ctx)
 			if err != nil {
-				log.Logger.Error("token重新获取失败：", zap.Error(err))
+				log.Logger.Error(logPrefix+"token重新获取失败：", zap.Error(err))
 				// 再次获取
 				err = c.GetToken(ctx)
 				if err != nil {
-					log.Logger.Error("token重新获取失败：", zap.Error(err))
-					ErrorChannel <- err
+					log.Logger.Error(logPrefix+"token重新获取失败：", zap.Error(err))
+					GlobalResultChan <- &AccountOrderResult{
+						AccountName: account.Name,
+						Success:     false,
+						Error:       err,
+					}
 					return
 				}
 			}
@@ -346,4 +380,104 @@ func TimeSleep(cfg *config.System) {
 	maxInterval := cfg.MaxInterval
 	interval := rand.Intn(maxInterval-minInterval+1) + minInterval
 	time.Sleep(time.Duration(interval) * time.Millisecond)
+}
+
+// GoOrderForAccount 多账号版本的抢票协程
+func GoOrderForAccount(ctx context.Context, index int, octx *OrderContext, orderReq *client.OrderReq, order *OrderDetail) {
+	logPrefix := fmt.Sprintf("[%s][%d] ", octx.AccountName, index)
+
+	// 除线程0，初始循环仍然加入随机等待
+	firstLoop := index == 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			if !firstLoop {
+				TimeSleep(octx.SystemConfig)
+			} else {
+				firstLoop = false
+			}
+
+			// 获取orderJobKey锁（每个账号独立的锁）
+			octx.OrderJobKeyLock.Lock()
+			if octx.OrderJobKeyAcquired { // 已经有线程获取到orderJobKey
+				octx.OrderJobKeyLock.Unlock()
+				continue
+			}
+			octx.OrderJobKeyLock.Unlock()
+
+			// 下单
+			orderResp, err := octx.Client.Order(ctx, orderReq)
+			if err != nil {
+				log.Logger.Error(logPrefix+"下单失败：", zap.Error(err))
+				continue
+			}
+
+			orderJobKey := orderResp.Result.OrderJobKey
+			if orderJobKey == "" {
+				log.Logger.Error(logPrefix + "orderJobKey为空")
+				continue
+			}
+
+			log.Logger.Info(fmt.Sprintf(logPrefix+"获取orderJobKey成功！orderJobKey：%s", orderJobKey))
+
+			// 获取orderJobKey锁
+			octx.OrderJobKeyLock.Lock()
+			octx.OrderJobKeyAcquired = true
+			octx.OrderJobKeyLock.Unlock()
+
+			OrderResult, orderResultCancel := context.WithCancel(ctx)
+			defer orderResultCancel()
+
+			// 每隔200ms发送查询订单结果
+			for {
+				select {
+				case <-OrderResult.Done():
+					return
+				default:
+					go func() {
+						GetOrderResp, err := octx.Client.GetOrderResult(ctx, orderJobKey)
+
+						if OrderResult.Err() != nil {
+							return
+						}
+
+						if err != nil {
+							log.Logger.Error(logPrefix+"查询订单结果失败：", zap.Error(err))
+							if strings.Contains(err.Error(), "小手指点得太快啦，休息一下") {
+								return
+							}
+							octx.OrderJobKeyLock.Lock()
+							octx.OrderJobKeyAcquired = false
+							octx.OrderJobKeyLock.Unlock()
+							orderResultCancel()
+							return
+						}
+						log.Logger.Info(fmt.Sprintf(logPrefix+"查询订单结果成功！订单号：%s", GetOrderResp.Result.OrderSn))
+						orderResultCancel()
+						// 发送成功结果到全局通道
+						octx.ResultChan <- &AccountOrderResult{
+							AccountName: octx.AccountName,
+							Order:       order,
+							Success:     true,
+						}
+					}()
+					time.Sleep(200 * time.Millisecond)
+				}
+			}
+		}
+	}
+}
+
+// ConfirmOrder 向后兼容的单账号抢票函数
+func ConfirmOrder(ctx context.Context, order *OrderDetail, cfg *config.Config) error {
+	// 将单账号配置转换为 Account 格式
+	account := &config.Account{
+		Name:      cfg.Showstart.Cusname,
+		Showstart: cfg.Showstart,
+		People:    cfg.Ticket.People,
+	}
+	return ConfirmOrderForAccount(ctx, order, account, cfg)
 }

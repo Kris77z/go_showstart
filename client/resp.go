@@ -138,47 +138,65 @@ type ActivityTicket struct {
 	} `json:"ticketPriceList"`
 }
 
+type AlternatePrompt struct {
+	Content   string `json:"content"`
+	Highlight bool   `json:"highlight"`
+}
+
 type TicketInfo struct {
-	TicketID                  string        `json:"ticketId"`
-	TicketType                string        `json:"ticketType"`
-	SellingPrice              string        `json:"sellingPrice"`
-	IsUndetermined            int           `json:"isUndetermined"`
-	CostPrice                 string        `json:"costPrice"`
-	TicketNum                 int           `json:"ticketNum"`
-	ValidateType              int           `json:"validateType"`
-	Time                      string        `json:"time"`
-	Instruction               string        `json:"instruction"`
-	Countdown                 int           `json:"countdown"`
-	RemainTicket              int           `json:"remainTicket"`
-	SaleStatus                int           `json:"saleStatus"`
-	ActivityID                int           `json:"activityId"`
-	GoodType                  int           `json:"goodType"`
-	Telephone                 string        `json:"telephone"`
-	AreaCode                  string        `json:"areaCode"`
-	LimitBuyNum               int           `json:"limitBuyNum"`
-	CanBuyNum                 int           `json:"canBuyNum"`
-	CityName                  string        `json:"cityName"`
-	UnPayOrderNum             int           `json:"unPayOrderNum"`
-	Type                      int           `json:"type"`
-	PickupAddress             string        `json:"pickupAddress"`
-	EntityMailInstruction     string        `json:"entityMailInstruction"`
-	EntityPickupInstruction   string        `json:"entityPickupInstruction"`
-	BuyType                   int           `json:"buyType"`
-	CanAddGoods               int           `json:"canAddGoods"`
-	TicketRecordStatus        int           `json:"ticketRecordStatus"`
-	StartSellNoticeStatus     int           `json:"startSellNoticeStatus"`
-	ShowRuleTip               bool          `json:"showRuleTip"`
-	StartTime                 int64         `json:"startTime"`
-	SessionID                 int           `json:"sessionId"`
-	ShowTime                  string        `json:"showTime"`
-	MemberNum                 int           `json:"memberNum"`
-	Labels                    []interface{} `json:"labels"`
-	EndTime                   string        `json:"endTime"`
-	TransformNum              int           `json:"transformNum"`
-	IsPreAuth                 int           `json:"isPreAuth"`
-	ConfirmPreOrderDetailTips string        `json:"confirmPreOrderDetailTips"`
-	GroupID                   int           `json:"groupId"`
-	IsCommonPerformerList     int           `json:"isCommonPerformerList"`
+	TicketID                     string            `json:"ticketId"`
+	TicketType                   string            `json:"ticketType"`
+	SellingPrice                 string            `json:"sellingPrice"`
+	IsUndetermined               int               `json:"isUndetermined"`
+	CostPrice                    string            `json:"costPrice"`
+	TicketNum                    int               `json:"ticketNum"`
+	ValidateType                 int               `json:"validateType"`
+	Time                         string            `json:"time"`
+	Instruction                  string            `json:"instruction"`
+	Countdown                    int               `json:"countdown"`
+	RemainTicket                 int               `json:"remainTicket"`
+	SaleStatus                   int               `json:"saleStatus"`
+	ActivityID                   int               `json:"activityId"`
+	GoodType                     int               `json:"goodType"`
+	Telephone                    string            `json:"telephone"`
+	AreaCode                     string            `json:"areaCode"`
+	LimitBuyNum                  int               `json:"limitBuyNum"`
+	CanBuyNum                    int               `json:"canBuyNum"`
+	CityName                     string            `json:"cityName"`
+	UnPayOrderNum                int               `json:"unPayOrderNum"`
+	Type                         int               `json:"type"`
+	PickupAddress                string            `json:"pickupAddress"`
+	EntityMailInstruction        string            `json:"entityMailInstruction"`
+	EntityPickupInstruction      string            `json:"entityPickupInstruction"`
+	BuyType                      int               `json:"buyType"`
+	CanAddGoods                  int               `json:"canAddGoods"`
+	TicketRecordStatus           int               `json:"ticketRecordStatus"`
+	StartSellNoticeStatus        int               `json:"startSellNoticeStatus"`
+	ShowRuleTip                  bool              `json:"showRuleTip"`
+	StartTime                    int64             `json:"startTime"`
+	SessionID                    int               `json:"sessionId"`
+	ShowTime                     string            `json:"showTime"`
+	MemberNum                    int               `json:"memberNum"`
+	Labels                       []interface{}     `json:"labels"`
+	EndTime                      string            `json:"endTime"`
+	TransformNum                 int               `json:"transformNum"`
+	IsPreAuth                    int               `json:"isPreAuth"`
+	ConfirmPreOrderDetailTips    string            `json:"confirmPreOrderDetailTips"`
+	GroupID                      int               `json:"groupId"`
+	IsCommonPerformerList        int               `json:"isCommonPerformerList"`
+	PreBuySuccessRate            *float64          `json:"preBuySuccessRate"`
+	AlternateSuccessRate         *float64          `json:"alternateSuccessRate"`
+	WaitingAlternateNum          int               `json:"waitingAlternateNum"`
+	AlternateLimitNum            int               `json:"alternateLimitNum"`
+	AlternateURL                 string            `json:"alternateUrl"`
+	AlternateContent             string            `json:"alternateContent"`
+	AlternateCloseTime           string            `json:"alternateCloseTime"`
+	AlternatePay                 int               `json:"alternatePay"`
+	AlternatePrompt              []AlternatePrompt `json:"alternatePrompt"`
+	AlternateServiceMinPremium   string            `json:"alternateServiceMinPremium"`
+	AlternateServicePremiumRatio float64           `json:"alternateServicePremiumRatio"`
+	IsOpenAlternate              int               `json:"isOpenAlternate"`
+	CommonPerformerTips          string            `json:"commonPerformerTips"`
 }
 
 type ConfirmResp struct {
@@ -324,11 +342,11 @@ type ActivitySearchListResp struct {
 }
 
 type ActivityInfo struct {
-	ActivityID int            `json:"activityId"`
-	Title      string         `json:"title"`
-	ShowTime   string         `json:"showTime"`
-	SiteName   string         `json:"siteName"`
-	OtherLabel []*OtherLabel  `json:"otherLabels"`
+	ActivityID int           `json:"activityId"`
+	Title      string        `json:"title"`
+	ShowTime   string        `json:"showTime"`
+	SiteName   string        `json:"siteName"`
+	OtherLabel []*OtherLabel `json:"otherLabels"`
 }
 
 type OtherLabel struct {

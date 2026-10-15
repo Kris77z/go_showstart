@@ -26,3 +26,11 @@ monitor_state/
 showstart_monitor
 
 log/log_file/*
+accounts*.json
+login.json
+.env*
+*.env
+*.local.yaml
+monitor_state*/
+private/
+showstart-monitor
